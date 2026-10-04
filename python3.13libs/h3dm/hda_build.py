@@ -67,22 +67,22 @@ def _import_ptg():
 
     geo = [
         _toggle("rendermesh", "Use Rhino Render Meshes", True,
-                help="Use the render meshes saved in the file when they exist (they match Rhino exactly). "
-                     "Faces without one are tessellated by H3DM."),
-        hou.FloatParmTemplate("chordtol", "Chord Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=100.0,
-                              help="Maximum distance between the surface and the mesh. 0 = automatic from the file tolerance."),
-        hou.FloatParmTemplate("maxangle", "Max Angle (degrees)", 1, default_value=(15.0,), min=1.0, max=90.0),
-        hou.FloatParmTemplate("maxedge", "Max Edge Length (model units)", 1, default_value=(0.0,), min=0.0, max=10000.0,
-                              help="0 = no limit."),
+                help="Use the render meshes saved in the file (they match Rhino exactly). Untrimmed faces without "
+                     "one are converted by Houdini; trimmed faces without one are skipped with a warning until "
+                     "H3DM 0.3 (own tessellation)."),
         _toggle("weld", "Weld Faces of One Object", True, help="Faces of one Brep share points along their edges."),
         hou.SeparatorParmTemplate("sep_geo1"),
         _menu("curves", "Curves", [("nurbs", "NURBS Curves (exact)"), ("poly", "Polylines")]),
         hou.FloatParmTemplate("curvetol", "Curve Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=100.0,
-                              conditionals={HIDE: "{ curves == nurbs }"}),
+                              conditionals={HIDE: "{ curves == nurbs }"},
+                              help="Maximum distance between a curve and its polyline. 0 = 1 mm in model units."),
         _menu("subd", "SubD", [("cage", "Control Net"), ("smooth", "Subdivided")]),
         hou.IntParmTemplate("subdlevel", "SubD Level", 1, default_value=(2,), min=1, max=5,
                             conditionals={HIDE: "{ subd == cage }"}),
-        _menu("blocks", "Blocks", [("packed", "Packed Instances"), ("expand", "Expand to Geometry")]),
+        _menu("blocks", "Blocks", [("packed", "Packed Instances"), ("expand", "Expand to Geometry")],
+              help="Packed Instances: one packed geometry per block definition (per insertion style if the block "
+                   "has By Parent objects). Expand: block objects are placed in the world; with Surface Output = "
+                   "Packed each of them becomes its own packed primitive."),
     ]
     g.append(_folder("geo_f", "Geometry", geo))
 
@@ -90,8 +90,11 @@ def _import_ptg():
         hou.StringParmTemplate("layers", "Layers", 1, default_value=("*",),
                                help="Globs on the full layer path (original names), ^glob excludes, e.g. "
                                     "Фасад::* ^*::Окна"),
-        _toggle("skiphidden", "Skip Hidden Layers", False),
-        _toggle("skiplocked", "Skip Locked Layers", False),
+        _toggle("skiphidden", "Skip Hidden", False,
+                help="Skip hidden objects and objects on hidden layers (parents included), on all outputs and "
+                     "inside blocks."),
+        _toggle("skiplocked", "Skip Locked", False,
+                help="Skip locked objects and objects on locked layers, on all outputs and inside blocks."),
         hou.SeparatorParmTemplate("sep_flt"),
         _toggle("t_surfaces", "Surfaces / Breps / Extrusions", True),
         _toggle("t_meshes", "Meshes", True),
@@ -99,6 +102,9 @@ def _import_ptg():
         _toggle("t_curves", "Curves", True),
         _toggle("t_points", "Points / Point Clouds", True),
         _toggle("t_blocks", "Blocks", True),
+        hou.LabelParmTemplate("flt_note", "Note", column_labels=(
+            "Type filters apply to block contents too. Layer globs apply to model objects (a block insertion "
+            "is judged by its own layer).",)),
     ]
     g.append(_folder("filter_f", "Filter", flt))
 
@@ -116,8 +122,14 @@ def _import_ptg():
         _menu("colormode", "Color", [("display", "Display Color (object / layer / material)"), ("object", "Object Color Only")]),
         _toggle("usertext", "User Text Dictionary (d@user_text)", True),
         _toggle("utflat", "User Text to Attributes", True, help="Each key becomes its own primitive attribute."),
-        _toggle("utnumbers", "Detect Numbers", True, help="Numeric values become float attributes.",
+        _toggle("utnumbers", "Detect Numbers", True,
+                help="Whole numbers that fit int32 (no leading zeros) become integer attributes, decimals with up to "
+                     "7 significant digits become float attributes. Everything else (007, 123456789012, long "
+                     "decimals) stays text, so nothing is rounded.",
                 conditionals={DISABLE: "{ utflat == 0 }"}),
+        hou.StringParmTemplate("uttextkeys", "Keep as Text", 1, default_value=("",),
+                               help="User Text keys (globs) that always stay text, e.g. id *_id code",
+                               conditionals={DISABLE: "{ utflat == 0 } { utnumbers == 0 }"}),
         _toggle("groups", "Rhino Groups to Primitive Groups", True),
         _toggle("materials", "Material Attribute", True),
     ]

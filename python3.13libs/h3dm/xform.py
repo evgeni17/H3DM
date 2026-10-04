@@ -44,16 +44,16 @@ class GlobalXform(object):
     def to_houdini(self, pts):
         """Точки Rhino (N,3 float64) -> Houdini (N,3 float64; приводить к float32 только после)."""
         p = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
-        return ((p - self.origin) * self.s) @ self.C.T
+        return np.einsum("ij,nj->ni", self.C, (p - self.origin) * self.s)
 
     def to_rhino(self, pts):
         """Точки Houdini (N,3) -> Rhino (N,3 float64)."""
         p = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
-        return (p @ self.C) / self.s + self.origin
+        return np.einsum("ji,nj->ni", self.C, p) / self.s + self.origin
 
     def vectors_to_houdini(self, v):
         """Направления (без сдвига и масштаба): нормали, оси плоскостей."""
-        return np.asarray(v, dtype=np.float64).reshape(-1, 3) @ self.C.T
+        return np.einsum("ij,nj->ni", self.C, np.asarray(v, dtype=np.float64).reshape(-1, 3))
 
     def placement(self, m4):
         """Матрица Rhino 4x4 (столбцовые векторы, в мировых координатах модели) -> (A 3x3, b 3)
@@ -68,7 +68,7 @@ class GlobalXform(object):
     def local_to_houdini(self, pts):
         """Точки в локальной системе блока (без origin) -> оси/единицы сцены."""
         p = np.asarray(pts, dtype=np.float64).reshape(-1, 3)
-        return (p * self.s) @ self.C.T
+        return np.einsum("ij,nj->ni", self.C, p * self.s)
 
     # ---------- матрицы ----------
     def matrix_rhino_to_houdini(self):

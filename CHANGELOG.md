@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.2.1 — 2026-10-05
+Fixes from the independent test report of 0.1–0.2. Every item has a regression test
+(`tests/make_edgecases.py` builds `h3dm_edgecases_v001.3dm`; checks in `test_read.py`, `test_names.py`,
+`houdini_regression.py`).
+* **Periodic NURBS** curves and surfaces changed shape and opened up. They are now converted to the equivalent
+  clamped NURBS by knot insertion (`h3dm.nurbs`): error against Rhino 1e-12, closed curves stay closed.
+* **User Text keys** `name` and `ut_name` no longer merge: the `ut_` prefix is applied before the uniqueness check.
+* **Names:** Latin names already in the file are reserved before transliteration (`Еда` no longer takes `Eda`);
+  layers per parent, in file order, so results are the same on every cook.
+* **Detect Numbers** no longer rounds: integers become int attributes (int32, no leading zeros), decimals only with
+  up to 7 significant digits; `007`, `123456789012` stay text. New **Keep as Text** (key globs).
+* **By Parent** colour/material of block objects follow their insertion, in Expand and Packed (one packed
+  definition per insertion style when needed).
+* **Colours:** vertex colours survive in Packed; point clouds keep their colours next to coloured meshes; points
+  without own colours take their object's colour, so point `Cd` never hides primitive colours.
+* **Point clouds** carry the full object attribute set (names, originals, path, material, User Text).
+* **Filters:** Skip Hidden / Skip Locked act the same on Geometry, Info and block contents (hidden or locked objects
+  and layers); type filters apply to block contents too.
+* **Packed + Blocks = Expand** now expands block objects into separate packed primitives.
+* **Curve Tolerance** works (adaptive polylines, 0 = 1 mm). Chord Tolerance, Max Angle and Max Edge Length were
+  removed from the interface until the own tessellation in 0.3 — they had no effect.
+* A broken file gives a short node error instead of a Python traceback.
+* The installer pins `rhino3dm>=8,<9`. Transforms use `einsum` instead of `@` (no spurious NumPy warnings).
+* Docs, File Info and node help describe what 0.2 really does with files saved without render meshes.
+* Known: Packed per Object is slower on large files (attributes are now written inside every packed object as
+  well); speed is part of 0.3.
+
 ## 0.2.0 — 2026-10-05
 * **Geometry import.** Breps and extrusions as exact NURBS faces (*NURBS Patches*: degree, knots and weights via
   Houdini JSON geometry, normals oriented like Rhino), render meshes (*Polygons*) or one packed primitive per

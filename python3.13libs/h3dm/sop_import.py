@@ -92,6 +92,8 @@ def read_options(owner):
     o.roundto = _ev(owner, "roundto", 1.0)
     o.farthreshold = _ev(owner, "farthreshold", 1000.0)
     o.manualorigin = _evt(owner, "manualorigin")
+    o.curvetol = _ev(owner, "curvetol", 0.0)
+    o.uttextkeys = _ev(owner, "uttextkeys", "")
     return o
 
 
@@ -288,13 +290,32 @@ def _write_xform(geo, gx, cls=hou.attribType.Global, point=None):
 # ---------------------------------------------------------------- имена
 
 class Naming(object):
-    """Имена слоёв/объектов/групп/ключей с транслитом и картой оригиналов."""
+    """Имена слоёв/объектов/групп/ключей с транслитом и картой оригиналов.
 
-    def __init__(self, opt):
+    Все имена файла регистрируются заранее (prepare_*): латинские имена занимаются первыми, и транслит
+    не может с ними совпасть; порядок — как в файле, поэтому результат одинаков от готовки к готовке.
+    """
+
+    def __init__(self, opt, f=None):
         from .names import NameMapper
         self.opt = opt
         self.m = NameMapper(opt.nonlatin, opt.layercase)
         self.keep_orig = opt.nonlatin == "translit_keep"
+        if f is not None:
+            self._prepare(f)
+
+    def _prepare(self, f):
+        from . import rhino_read
+        self.m.prepare_layers([l.FullPath for l in f.Layers])
+        names, keys = [], []
+        for o in f.Objects:
+            a = o.Attributes
+            names.append(a.Name or "")
+            keys.extend(k for k, _ in (a.GetUserStrings() if a.UserStringCount else ()))
+        names += [m.Name or "" for m in f.Materials]
+        self.m.prepare_names(names)
+        self.m.prepare_groups([g.Name or ("Group%d" % g.Index) for g in f.Groups])
+        self.m.prepare_attribs(keys, RESERVED_UT)
 
     def layer(self, full_path):
         out = self.m.layer(full_path, "::")
@@ -309,11 +330,9 @@ class Naming(object):
         return self.m.group(g)
 
     def key(self, k):
-        a = self.m.attrib(k)
-        return ("ut_" + a) if a in RESERVED_UT else a
+        return self.m.attrib(k, RESERVED_UT)
 
     def path(self, layer_full, name, fallback):
-        from .names import safe_identifier
         segs = [s.replace("/", "_") for s in self.m.layer(layer_full, "::").split("::") if s]
         leaf = (self.m.name(name) if name else fallback).replace("/", "_")
         return "/" + "/".join(segs + [leaf])
@@ -382,6 +401,8 @@ class Builder(object):
     def write(self, geo):
         """-> (obj index на примитив, face на примитив, флаги групп) в порядке примитивов geo."""
         prim_obj, prim_face, groups = [], [], {GROUP_TRIM: [], GROUP_TRIMMED: [], GROUP_SUBD: []}
+        self.point_colors = []    # (первая точка, цвета (N,3)) — цвета вершин сеток
+        self.cloud_points = []    # (первая точка, число, цвета или None, объект)
         # 1) полигоны
         if self.mesh_f:
             V = np.concatenate(self.mesh_v).astype(np.float32)
@@ -390,14 +411,11 @@ class Builder(object):
             off = pts0
             polys = [tuple(i + off for i in fc) for fc in self.mesh_f] if off else self.mesh_f
             geo.createPolygons(polys)
-            if any(c is not None for c in self.mesh_vc):
-                cols = np.ones((len(V), 3), dtype=np.float32)
-                k = 0
-                for v, c in zip(self.mesh_v, self.mesh_vc):
-                    if c is not None:
-                        cols[k:k + len(v)] = c[:, :3]
-                    k += len(v)
-                self._point_cd = (pts0, cols)
+            k = pts0
+            for v, c in zip(self.mesh_v, self.mesh_vc):
+                if c is not None:
+                    self.point_colors.append((k, np.asarray(c, dtype=np.float32)))
+                k += len(v)
             n0 = len(prim_obj)
             prim_obj += self.mesh_obj
             prim_face += self.mesh_face
@@ -441,7 +459,6 @@ class Builder(object):
                     if trimmed:
                         groups[GROUP_TRIMMED].append(n0 + k)
         # 4) облака точек — отдельные точки без примитивов
-        self.cloud_points = []
         for v, c, obj in self.cloud:
             base = geo.intrinsicValue("pointcount")
             geo.createPoints(v.astype(np.float32).tolist())
@@ -530,153 +547,187 @@ def cook(node, output=0):
     if not has_rhino3dm():
         raise hou.NodeError("rhino3dm is not installed. Run H3DM > Install / Update rhino3dm.")
     opt = read_options(owner)
-    f = open_file(path)
+    try:
+        f = open_file(path)
+    except Exception as ex:
+        raise hou.NodeError("Cannot read the 3dm file: %s" % ex)
+    unit_m = _unit_m(f)
+    if opt.curvetol <= 0:
+        opt.curvetol = 0.001 / unit_m          # авто: 1 мм в единицах модели
     gx = resolve_xform(node, opt, path, f)
     if output == 2:
         pt = geo.createPoint()
         _write_xform(geo, gx, hou.attribType.Point, pt)
         _write_xform(geo, gx)
         return
-    naming = Naming(opt)
+    naming = Naming(opt, f)
     if output == 1:
         _cook_info(node, geo, f, opt, gx, naming)
         return
     _cook_geometry(node, geo, f, opt, gx, naming)
 
 
+def _unit_m(f):
+    from . import rhino_read
+    return rhino_read.UNIT_M.get(rhino_read.enum_name(f.Settings.ModelUnitSystem), 1.0) or 1.0
+
+
+class Context(object):
+    """Общие данные одной готовки: файл, таблицы, параметры, кэши блоков."""
+
+    def __init__(self, f, opt, gx, naming):
+        from . import rhino_read
+        self.f, self.opt, self.gx, self.naming = f, opt, gx, naming
+        self.tables = rhino_read.Tables(f)
+        self.tol = rhino_read.doc_info(f)["abs_tolerance"] or 1e-6
+        self.stats = {}
+        self.block_cache = {}      # определения блоков: записи
+        self.frozen_cache = {}     # (блок, стиль вставки) -> packed-геометрия
+        self.parent_memo = {}
+
+
 def _cook_geometry(node, geo, f, opt, gx, naming):
     from . import rhino_read
-    tables = rhino_read.Tables(f)
-    doc = rhino_read.doc_info(f)
-    tol = doc["abs_tolerance"] or 1e-6
-    stats = {}
-    recs = list(rhino_read.iter_objects(f, opt, tables, stats))
-    b = Builder(gx, opt, tol)
-    objs = []                      # записи объектов в порядке индексов
-    block_cache, frozen_cache = {}, {}
+    ctx = Context(f, opt, gx, naming)
+    recs = list(rhino_read.iter_objects(f, opt, ctx.tables, ctx.stats))
+    b = Builder(gx, opt, ctx.tol)
+    objs = []
 
-    def add_record(rec, to_h, parent_rec=None):
+    def add_record(rec, to_h):
         oi = len(objs)
-        objs.append((rec, parent_rec))
-        if opt.surfout == "packed" and parent_rec is None:
-            sub = _record_geometry(rec, opt, gx, tol, naming, tables, f, stats, block_cache, frozen_cache)
-            if sub is not None:
-                bb = sub[1]
-                b.packed.append((sub[0], None, bb, oi))
-            return
+        objs.append(rec)
         inst = [p for p in rec["parts"] if p["t"] == "instance"]
         other = [p for p in rec["parts"] if p["t"] != "instance"]
+        if opt.surfout == "packed":
+            if inst and opt.blocks == "expand":
+                # Packed + Expand: каждый объект блока — свой packed-примитив
+                if other:
+                    _pack_record(b, dict(rec, parts=other), oi, ctx)
+                for p in inst:
+                    _expand_instance(p, rec, add_record, ctx)
+            else:
+                _pack_record(b, rec, oi, ctx)
+            return
         b.add_parts(other, oi, to_h)
         for p in inst:
             if opt.blocks == "expand":
-                _expand_instance(p, to_h, rec, add_record, f, tables, opt, stats, block_cache)
+                _expand_instance(p, rec, add_record, ctx)
             else:
-                frozen = _idef_frozen(p["idef"], f, tables, opt, gx, tol, naming, stats, block_cache, frozen_cache)
+                frozen = _idef_frozen(p["idef"], ctx, rec)
                 if frozen is not None:
-                    A, bb = gx.placement(p["m"]) if parent_rec is None else (None, None)
+                    A, bb = gx.placement(p["m"])
                     b.packed.append((frozen, A, bb, oi))
 
     for rec in recs:
         add_record(rec, gx.to_houdini)
 
-    prim_obj, prim_face, groups = b.write(geo)
-    _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, opt, naming, tables)
-    _write_cloud_attribs(geo, b, objs, opt, naming)
-    if getattr(b, "_point_cd", None) is not None:
-        start, cols = b._point_cd
-        _attr(geo, hou.attribType.Point, "Cd", (1.0, 1.0, 1.0))
-        allc = np.ones((geo.intrinsicValue("pointcount"), 3), dtype=np.float32)
-        allc[start:start + len(cols)] = cols
-        geo.setPointFloatAttribValuesFromString("Cd", allc.tobytes())
-    if opt.subd == "smooth" and groups[GROUP_SUBD]:
-        _subdivide(geo, opt.subdlevel)
-
+    groups = _emit(geo, b, objs, ctx)
     write_document(geo, f, naming)
     _write_xform(geo, gx)
     warns = list(naming.m.warnings)
-    if stats.get("faces_without_mesh"):
-        warns.append("%d trimmed faces have no render mesh in the file (saved with Save Small?) and were skipped: "
-                     "H3DM tessellation of trimmed faces comes in 0.3. Re-save the file in Rhino with meshes."
-                     % stats["faces_without_mesh"])
-    if stats.get("skipped_kinds"):
-        warns.append("Skipped object types: %s" % ", ".join("%s x%d" % kv for kv in stats["skipped_kinds"].items()))
+    st = ctx.stats
+    if st.get("faces_without_mesh"):
+        warns.append("%d trimmed faces have no render mesh in the file (saved with Save Small?) and were skipped. "
+                     "Own tessellation of trimmed faces comes in H3DM 0.3; until then re-save the file in Rhino "
+                     "with render meshes." % st["faces_without_mesh"])
+    if st.get("skipped_kinds"):
+        warns.append("Skipped object types: %s" % ", ".join("%s x%d" % kv for kv in st["skipped_kinds"].items()))
     if warns:
         _detail(geo, "h3dm_warnings", warns)
         for w in warns[:5]:
             node.addWarning(w)
 
 
-def _record_geometry(rec, opt, gx, tol, naming, tables, f, stats, block_cache, frozen_cache):
-    """Packed per Object: геометрия объекта относительно центра габарита."""
-    sub = hou.Geometry()
-    bld = Builder(gx, opt, tol)
-    pts = [p for p in rec["parts"] if p["t"] in ("mesh", "poly", "points")]
-    allv = [p["v"] for p in pts] + [p["cv"].reshape(-1, 3) for p in rec["parts"] if p["t"] in ("ncurve", "nsurf")]
-    if not allv and not any(p["t"] == "instance" for p in rec["parts"]):
-        return None
+def _emit(geo, b, objs, ctx):
+    """Записать собранное в geo: примитивы, атрибуты объектов, облака, цвета точек, SubD."""
+    prim_obj, prim_face, groups = b.write(geo)
+    _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, ctx)
+    _write_cloud_attribs(geo, b, objs, ctx)
+    _write_point_colors(geo, b, objs, ctx)
+    if ctx.opt.subd == "smooth" and groups[GROUP_SUBD]:
+        _subdivide(geo, ctx.opt.subdlevel)
+    return groups
+
+
+def _pack_record(b, rec, oi, ctx):
+    """Packed per Object: геометрия объекта относительно центра габарита -> packed-примитив в b."""
+    gx = ctx.gx
+    parts = rec["parts"]
+    allv = [p["v"] for p in parts if p["t"] in ("mesh", "poly", "points")] + \
+           [p["cv"].reshape(-1, 3) for p in parts if p["t"] in ("ncurve", "nsurf")]
+    inst = [p for p in parts if p["t"] == "instance"]
+    if not allv and not inst:
+        return
     if allv:
         h = gx.to_houdini(np.concatenate(allv))
         center = (h.min(axis=0) + h.max(axis=0)) * 0.5
     else:
-        center = gx.to_houdini(rec["parts"][0]["m"][:3, 3].reshape(1, 3))[0]
-
-    def to_h(v):
-        return gx.to_houdini(v) - center
-    bld.add_parts([p for p in rec["parts"] if p["t"] != "instance"], 0, to_h)
-    for p in rec["parts"]:
-        if p["t"] == "instance":
-            frozen = _idef_frozen(p["idef"], f, tables, opt, gx, tol, naming, stats, block_cache, frozen_cache)
-            if frozen is not None:
-                A, bb = gx.placement(p["m"])
-                bld.packed.append((frozen, A, bb - center, 0))
-    bld.write(sub)
-    return sub.freeze(True), center
+        center = gx.to_houdini(inst[0]["m"][:3, 3].reshape(1, 3))[0]
+    sub = hou.Geometry()
+    bld = Builder(gx, ctx.opt, ctx.tol)
+    bld.add_parts([p for p in parts if p["t"] != "instance"], 0, lambda v: gx.to_houdini(v) - center)
+    for p in inst:
+        frozen = _idef_frozen(p["idef"], ctx, rec)
+        if frozen is not None:
+            A, bb = gx.placement(p["m"])
+            bld.packed.append((frozen, A, bb - center, 0))
+    _emit(sub, bld, [rec], ctx)
+    b.packed.append((sub.freeze(True), None, center, oi))
 
 
-def _idef_frozen(idef_id, f, tables, opt, gx, tol, naming, stats, block_cache, frozen_cache, depth=0):
-    """Геометрия определения блока (локальные координаты блока, оси/единицы сцены), один раз на блок."""
+def _style_key(rec):
+    return (tuple(round(x, 6) for x in rec["display"]), rec.get("material_index", -1))
+
+
+def _idef_frozen(idef_id, ctx, parent=None, depth=0):
+    """Геометрия определения блока (локальные координаты, оси/единицы сцены).
+
+    Одна на блок; если внутри есть объекты «By Parent» — одна на каждый стиль вставки.
+    """
     from . import rhino_read
-    if idef_id in frozen_cache:
-        return frozen_cache[idef_id]
     if depth > 16:
         return None
-    recs = rhino_read.block_definition(f, tables, idef_id, opt, stats, block_cache)
+    by_parent = rhino_read.uses_parent(ctx.f, ctx.tables, idef_id, _memo=ctx.parent_memo)
+    key = (idef_id, _style_key(parent)) if (by_parent and parent is not None) else (idef_id, None)
+    if key in ctx.frozen_cache:
+        return ctx.frozen_cache[key]
+    gx = ctx.gx
+    recs = rhino_read.block_definition(ctx.f, ctx.tables, idef_id, ctx.opt, ctx.stats, ctx.block_cache)
+    d = ctx.tables.idefs.get(idef_id)
+    bname = d.Name if d is not None else ""
     sub = hou.Geometry()
-    bld = Builder(gx, opt, tol)
+    bld = Builder(gx, ctx.opt, ctx.tol)
     objs = []
     for rec in recs:
+        rec = dict(rhino_read.apply_parent(rec, parent), block=bname)
         oi = len(objs)
-        objs.append((rec, None))
+        objs.append(rec)
         bld.add_parts([p for p in rec["parts"] if p["t"] != "instance"], oi, gx.local_to_houdini)
         for p in rec["parts"]:
             if p["t"] == "instance":
-                inner = _idef_frozen(p["idef"], f, tables, opt, gx, tol, naming, stats, block_cache, frozen_cache, depth + 1)
+                inner = _idef_frozen(p["idef"], ctx, rec, depth + 1)
                 if inner is not None:
                     m = p["m"]
-                    C = gx.C
-                    A = C @ m[:3, :3] @ C.T
+                    A = gx.C @ m[:3, :3] @ gx.C.T
                     bb = gx.local_to_houdini(m[:3, 3].reshape(1, 3))[0]
                     bld.packed.append((inner, A, bb, oi))
-    prim_obj, prim_face, groups = bld.write(sub)
-    _write_prim_attribs(sub, objs, prim_obj, prim_face, groups, opt, naming, tables)
-    d = tables.idefs.get(idef_id)
-    _set_strings(sub, hou.attribType.Prim, "block", [d.Name if d is not None else ""] * len(sub.prims()))
+    _emit(sub, bld, objs, ctx)
     frozen = sub.freeze(True)
-    frozen_cache[idef_id] = frozen
+    ctx.frozen_cache[key] = frozen
     return frozen
 
 
-def _expand_instance(p, to_h, parent, add_record, f, tables, opt, stats, block_cache, depth=0):
-    """Blocks = Expand: объекты определения ставятся в мир (двойная точность), рекурсивно."""
+def _expand_instance(p, parent, add_record, ctx, depth=0):
+    """Blocks = Expand: объекты определения ставятся в мир (двойная точность), рекурсивно.
+    Объекты «By Parent» получают цвет/материал своей вставки."""
     from . import rhino_read
     if depth > 16:
         return
     m = p["m"]
-    d = tables.idefs.get(p["idef"])
-    for rec in rhino_read.block_definition(f, tables, p["idef"], opt, stats, block_cache):
-        rec2 = dict(rec)
-        rec2["block"] = d.Name if d is not None else ""
-        rec2["instance_id"] = parent["id"]
+    d = ctx.tables.idefs.get(p["idef"])
+    for rec in rhino_read.block_definition(ctx.f, ctx.tables, p["idef"], ctx.opt, ctx.stats, ctx.block_cache):
+        rec2 = rhino_read.apply_parent(rec, parent)
+        rec2 = dict(rec2, block=d.Name if d is not None else "", instance_id=parent.get("instance_id") or parent["id"])
         parts2 = []
         for q in rec["parts"]:
             q2 = dict(q)
@@ -689,10 +740,11 @@ def _expand_instance(p, to_h, parent, add_record, f, tables, opt, stats, block_c
                 q2["m"] = m @ q["m"]
             parts2.append(q2)
         rec2["parts"] = [q for q in parts2 if q["t"] != "instance"]
-        add_record(rec2, to_h, None)
+        if rec2["parts"]:
+            add_record(rec2, ctx.gx.to_houdini)
         for q in parts2:
             if q["t"] == "instance":
-                _expand_instance(q, to_h, rec2, add_record, f, tables, opt, stats, block_cache, depth + 1)
+                _expand_instance(q, rec2, add_record, ctx, depth + 1)
 
 
 def _subdivide(geo, level):
@@ -709,23 +761,17 @@ def _subdivide(geo, level):
 
 # ---------------------------------------------------------------- атрибуты объектов
 
-def _number(s):
-    try:
-        return float(str(s).replace(",", ".").strip())
-    except Exception:
-        return None
+from .names import number_kind as _number_kind  # noqa: E402
 
 
 def _object_values(objs, opt, naming):
     """Значения атрибутов на объект."""
-    out = {"layer": [], "layer_orig": [], "name": [], "name_orig": [], "rhino_id": [], "rhino_type": [],
-           "path": [], "Cd": [], "Alpha": [], "material": [], "user_text": [], "block": [], "groups": []}
-    for rec, _ in objs:
-        lay = naming.layer(rec["layer"])
-        nm = naming.name(rec["name"])
-        out["layer"].append(lay)
+    out = {k: [] for k in ("layer", "layer_orig", "name", "name_orig", "rhino_id", "rhino_type", "path", "Cd",
+                           "Alpha", "material", "user_text", "block", "groups")}
+    for rec in objs:
+        out["layer"].append(naming.layer(rec["layer"]))
         out["layer_orig"].append(rec["layer"])
-        out["name"].append(nm)
+        out["name"].append(naming.name(rec["name"]))
         out["name_orig"].append(rec["name"])
         out["rhino_id"].append(rec.get("instance_id") or rec["id"])
         out["rhino_type"].append(rec["kind"])
@@ -740,45 +786,52 @@ def _object_values(objs, opt, naming):
     return out
 
 
-def _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, opt, naming, tables):
-    n = len(prim_obj)
-    if n == 0:
-        return
-    vals = _object_values(objs, opt, naming)
-    idx = np.asarray(prim_obj, dtype=np.int64)
-    P = hou.attribType.Prim
+def _write_object_attribs(geo, cls, vals, idx, ctx, with_color=True):
+    """Атрибуты объектов на элементы класса cls; idx — индекс объекта для каждого элемента."""
+    opt, naming = ctx.opt, ctx.naming
+    idx = np.asarray(idx, dtype=np.int64)
 
-    def per_prim(key):
+    def per(key):
         col = vals[key]
         return [col[i] for i in idx]
 
-    if len(geo.prims()) != n:
-        raise hou.NodeError("internal: primitive count mismatch (%d vs %d)" % (len(geo.prims()), n))
-    _set_strings(geo, P, "layer", per_prim("layer"))
-    _set_strings(geo, P, "name", per_prim("name"))
+    _set_strings(geo, cls, "layer", per("layer"))
+    _set_strings(geo, cls, "name", per("name"))
     if naming.keep_orig and naming.m.active:
         if any(a != b for a, b in zip(vals["layer"], vals["layer_orig"])):
-            _set_strings(geo, P, "layer_orig", per_prim("layer_orig"))
+            _set_strings(geo, cls, "layer_orig", per("layer_orig"))
         if any(a != b for a, b in zip(vals["name"], vals["name_orig"])):
-            _set_strings(geo, P, "name_orig", per_prim("name_orig"))
-    _set_strings(geo, P, "rhino_id", per_prim("rhino_id"))
-    _set_strings(geo, P, "rhino_type", per_prim("rhino_type"))
-    _set_ints(geo, P, "rhino_face", prim_face)
+            _set_strings(geo, cls, "name_orig", per("name_orig"))
+    _set_strings(geo, cls, "rhino_id", per("rhino_id"))
+    _set_strings(geo, cls, "rhino_type", per("rhino_type"))
     if opt.pathattr:
-        _set_strings(geo, P, "path", per_prim("path"))
-    _set_floats(geo, P, "Cd", np.asarray(vals["Cd"], dtype=np.float32)[idx], 3, 1.0)
-    _set_floats(geo, P, "Alpha", np.asarray(vals["Alpha"], dtype=np.float32)[idx], 1, 1.0)
+        _set_strings(geo, cls, "path", per("path"))
+    if with_color:
+        _set_floats(geo, cls, "Cd", np.asarray(vals["Cd"], dtype=np.float32)[idx], 3, 1.0)
+        _set_floats(geo, cls, "Alpha", np.asarray(vals["Alpha"], dtype=np.float32)[idx], 1, 1.0)
     if opt.materials and any(vals["material"]):
-        _set_strings(geo, P, "material", per_prim("material"))
+        _set_strings(geo, cls, "material", per("material"))
     if any(vals["block"]):
-        _set_strings(geo, P, "block", per_prim("block"))
-    _write_user_text(geo, P, vals["user_text"], idx, opt, naming)
-    if opt.groups:
+        _set_strings(geo, cls, "block", per("block"))
+    _write_user_text(geo, cls, vals["user_text"], idx, opt, naming)
+
+
+def _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, ctx):
+    n = len(prim_obj)
+    if n == 0:
+        return
+    if len(geo.prims()) != n:
+        raise hou.NodeError("internal: primitive count mismatch (%d vs %d)" % (len(geo.prims()), n))
+    vals = _object_values(objs, ctx.opt, ctx.naming)
+    P = hou.attribType.Prim
+    _write_object_attribs(geo, P, vals, prim_obj, ctx)
+    _set_ints(geo, P, "rhino_face", prim_face)
+    if ctx.opt.groups:
         by_group = {}
         for pi, oi in enumerate(prim_obj):
             for g in vals["groups"][oi]:
                 by_group.setdefault(g, []).append(pi)
-        _make_groups(geo, by_group, naming)
+        _make_groups(geo, by_group, ctx.naming)
     prims = None
     for gname, members in groups.items():
         if members:
@@ -802,6 +855,8 @@ def _write_user_text(geo, cls, ut_list, idx, opt, naming):
         _set_dicts(geo, cls, "user_text", [ut_list[i] for i in idx])
     if not opt.utflat:
         return
+    import fnmatch
+    text_keys = [g for g in (opt.uttextkeys or "").split() if g]
     keys = []
     for d in ut_list:
         for k in d:
@@ -810,40 +865,66 @@ def _write_user_text(geo, cls, ut_list, idx, opt, naming):
     for k in keys:
         col = [d.get(k) for d in ut_list]
         attr = naming.key(k)
-        nums = [_number(v) for v in col if v is not None]
-        if opt.utnumbers and nums and all(x is not None for x in nums):
-            arr = np.array([(_number(v) if v is not None else 0.0) for v in col], dtype=np.float64)
+        kind = None
+        if opt.utnumbers and not any(fnmatch.fnmatchcase(k, g) for g in text_keys):
+            kind = _number_kind(col)
+        if kind == "int":
+            arr = np.array([int(v) if v not in (None, "") else 0 for v in col], dtype=np.int64)
+            _set_ints(geo, cls, attr, arr[idx])
+        elif kind == "float":
+            arr = np.array([float(v) if v not in (None, "") else 0.0 for v in col], dtype=np.float64)
             _set_floats(geo, cls, attr, arr[idx], 1, 0.0)
         else:
             _set_strings(geo, cls, attr, [(col[i] or "") for i in idx])
 
 
-def _write_cloud_attribs(geo, b, objs, opt, naming):
-    """Облака точек: атрибуты объекта на точках (у точек нет примитивов)."""
+def _write_cloud_attribs(geo, b, objs, ctx):
+    """Облака точек: все атрибуты объекта на точках (у точек нет примитивов)."""
     if not b.cloud_points:
         return
     npts = geo.intrinsicValue("pointcount")
-    vals = _object_values(objs, opt, naming)
-    lay = [""] * npts
-    nam = [""] * npts
-    rid = [""] * npts
-    cd = None
-    for base, n, c, oi in b.cloud_points:
-        for i in range(base, base + n):
-            lay[i], nam[i], rid[i] = vals["layer"][oi], vals["name"][oi], vals["rhino_id"][oi]
-        if c is not None:
-            if cd is None:
-                cd = np.ones((npts, 3), dtype=np.float32)
-            cd[base:base + n] = c[:, :3]
-    T = hou.attribType.Point
-    _set_strings(geo, T, "layer", lay)
-    _set_strings(geo, T, "name", nam)
-    _set_strings(geo, T, "rhino_id", rid)
-    if cd is not None:
-        _set_floats(geo, T, "Cd", cd, 3, 1.0)
+    idx = np.full(npts, -1, dtype=np.int64)
+    for base, n, _, oi in b.cloud_points:
+        idx[base:base + n] = oi
+    sel = np.nonzero(idx >= 0)[0]
+    vals = _object_values(objs, ctx.opt, ctx.naming)
+    # элементы без объекта получают значения пустой записи (последний индекс)
+    blank = {"layer": "", "layer_orig": "", "name": "", "name_orig": "", "rhino_id": "", "rhino_type": "",
+             "path": "", "Cd": (1.0, 1.0, 1.0), "Alpha": 1.0, "material": "", "user_text": {}, "block": "", "groups": []}
+    for k, v in blank.items():
+        vals[k] = vals[k] + [v]
+    full = np.where(idx >= 0, idx, len(objs))
+    _write_object_attribs(geo, hou.attribType.Point, vals, full, ctx, with_color=False)
     grp = geo.findPointGroup("rhino_point_clouds") or geo.createPointGroup("rhino_point_clouds")
     pts = geo.points()
-    grp.add([pts[i] for base, n, _, _ in b.cloud_points for i in range(base, base + n)])
+    grp.add([pts[i] for i in sel])
+
+
+def _write_point_colors(geo, b, objs, ctx):
+    """Точечный Cd — только если у сеток есть цвета вершин или у облаков свои цвета.
+
+    Точки без своих цветов получают цвет своего объекта (иначе точечный Cd перекрыл бы Cd примитивов).
+    """
+    if not b.point_colors and not b.cloud_points:
+        return
+    npts = geo.intrinsicValue("pointcount")
+    if npts == 0:
+        return
+    cd = np.ones((npts, 3), dtype=np.float32)
+    if geo.findPrimAttrib("Cd") is not None and len(geo.prims()):
+        verb = hou.sopNodeTypeCategory().nodeVerb("attribpromote")
+        verb.setParms({"inname": "Cd", "inclass": 1, "outclass": 2, "method": 8, "useoutname": 1,
+                       "outname": "__h3dm_pcd", "deletein": 0})
+        tmp = hou.Geometry()
+        verb.execute(tmp, [geo])
+        if tmp.findPointAttrib("__h3dm_pcd") is not None and tmp.intrinsicValue("pointcount") == npts:
+            cd = np.frombuffer(tmp.pointFloatAttribValuesAsString("__h3dm_pcd"), dtype=np.float32).reshape(-1, 3).copy()
+    vals = _object_values(objs, ctx.opt, ctx.naming)
+    for base, n, c, oi in b.cloud_points:
+        cd[base:base + n] = c[:, :3] if c is not None else np.asarray(vals["Cd"][oi], dtype=np.float32)
+    for base, cols in b.point_colors:
+        cd[base:base + len(cols)] = cols[:, :3]
+    _set_floats(geo, hou.attribType.Point, "Cd", cd, 3, 1.0)
 
 
 # ---------------------------------------------------------------- Info
@@ -854,14 +935,14 @@ def _cook_info(node, geo, f, opt, gx, naming):
     want = {k for k, parm in (("dots", "i_dots"), ("text", "i_text"), ("dims", "i_dims"), ("points", "i_points"),
                                ("lights", "i_lights"), ("blocks", "i_blocks")) if _ev(owner, parm, 1 if k != "blocks" else 0)}
     tables = rhino_read.Tables(f)
-    recs = rhino_read.info_records(f, tables, want, rhino_read.layer_filter(opt.layers), opt.skiphidden)
+    recs = rhino_read.info_records(f, tables, want, rhino_read.layer_filter(opt.layers), opt.skiphidden, opt.skiplocked)
     if not recs:
         return
     P = np.array([r["P"] for r in recs], dtype=np.float64)
     H = gx.to_houdini(P).astype(np.float32)
     geo.createPoints(H.tolist())
     T = hou.attribType.Point
-    objs = [(r, None) for r in recs]
+    objs = list(recs)
     vals = _object_values(objs, opt, naming)
     idx = np.arange(len(recs))
     _set_strings(geo, T, "info_type", [r["type"] for r in recs])

@@ -211,7 +211,8 @@ def file_info(path):
     if s["extrusions"]:
         lines.append("Extrusions: %d, with render mesh: %d" % (s["extrusions"], s["extrusions_with_render_mesh"]))
     if s["brep_faces"] and s["faces_with_render_mesh"] < s["brep_faces"]:
-        lines.append("  Note: some faces have no render mesh (file saved with Save Small?) -> H3DM tessellates them.")
+        lines.append("  Note: some faces have no render mesh (file saved with Save Small?). Untrimmed ones are "
+                     "converted by Houdini; trimmed ones are skipped until H3DM 0.3 — re-save with meshes.")
     lines.append("Layers: %d (Cyrillic names: %d)   Object names in Cyrillic: %d"
                  % (s["layers"], s["layers_cyrillic"], s["object_names_cyrillic"]))
     lines.append("Materials: %d   Groups: %d   Blocks: %d" % (s["materials"], s["groups"], s["blocks"]))
@@ -252,7 +253,7 @@ def _apply(m, v):
     """Применить 4x4 к точкам (N,3) в double."""
     if m is None or len(v) == 0:
         return v
-    return v @ m[:3, :3].T + m[:3, 3]
+    return np.einsum("ij,nj->ni", m[:3, :3], v) + m[:3, 3]
 
 
 # ---------- сетки ----------
@@ -294,7 +295,10 @@ def nurbs_curve_data(c):
         w = p.W if rational else 1.0
         W[i] = w
         P[i] = (p.X / w, p.Y / w, p.Z / w) if rational and w else (p.X, p.Y, p.Z)
-    return {"cv": P, "w": W, "order": nc.Order, "knots": _full_knots(nc.Knots), "rational": rational,
+    from .nurbs import clamp_curve
+    # периодические (незажатые) кривые -> эквивалентные зажатые: Houdini понимает их однозначно
+    P, W, knots = clamp_curve(P, W, _full_knots(nc.Knots), nc.Order)
+    return {"cv": P, "w": W, "order": nc.Order, "knots": knots, "rational": rational,
             "closed": bool(nc.IsClosed), "periodic": bool(nc.IsPeriodic)}
 
 
@@ -319,6 +323,8 @@ def nurbs_surface_data(s, reverse=False):
             W[j, i] = w
             P[j, i] = (p.X / w, p.Y / w, p.Z / w) if rational and w else (p.X, p.Y, p.Z)
     ku, kv = _full_knots(ns.KnotsU), _full_knots(ns.KnotsV)
+    from .nurbs import clamp_surface
+    P, W, ku, kv = clamp_surface(P, W, ku, kv, ns.OrderU, ns.OrderV)
     if reverse:
         P, W = P[:, ::-1], W[:, ::-1]
         a, b = ku[0], ku[-1]
@@ -352,17 +358,44 @@ def face_boundary_curves(brep, face):
     return out
 
 
-def sample_curve(c, segments_per_span=8):
-    """Полилиния по кривой (для режима Polylines)."""
+def sample_curve(c, tol):
+    """Полилиния по кривой с отклонением хорды не больше tol (единицы модели)."""
     r = _r()
     if isinstance(c, r.LineCurve):
         return np.array([_pt(c.PointAtStart), _pt(c.PointAtEnd)])
     if isinstance(c, r.PolylineCurve):
         return np.array([_pt(c.Point(i)) for i in range(c.PointCount)])
     dom = c.Domain
-    n = max(8, c.SpanCount * segments_per_span * max(1, c.Degree))
-    ts = np.linspace(dom.T0, dom.T1, n + 1)
-    return np.array([_pt(c.PointAt(float(t))) for t in ts])
+    t0, t1 = dom.T0, dom.T1
+    # стартовое разбиение: границы пролётов, каждый — на 2*степень частей
+    nc = c.ToNurbsCurve()
+    if nc is not None:
+        ks = sorted({nc.Knots[i] for i in range(len(nc.Knots)) if t0 <= nc.Knots[i] <= t1} | {t0, t1})
+    else:
+        ks = [t0, t1]
+    deg = max(1, c.Degree)
+    ts = []
+    for k0, k1 in zip(ks[:-1], ks[1:]):
+        ts.extend(np.linspace(k0, k1, 2 * deg + 1)[:-1].tolist())
+    ts.append(t1)
+    pt = {t: np.array(_pt(c.PointAt(t))) for t in ts}
+
+    def refine(ta, tb, depth):
+        tm = 0.5 * (ta + tb)
+        pm = np.array(_pt(c.PointAt(tm)))
+        pa, pb = pt[ta], pt[tb]
+        ab = pb - pa
+        L = float(np.dot(ab, ab))
+        dev = np.linalg.norm(pm - pa) if L == 0 else np.linalg.norm(np.cross(pm - pa, ab)) / np.sqrt(L)
+        if dev <= tol or depth >= 14:
+            return [tb]
+        pt[tm] = pm
+        return refine(ta, tm, depth + 1) + refine(tm, tb, depth + 1)
+
+    out = [ts[0]]
+    for ta, tb in zip(ts[:-1], ts[1:]):
+        out += refine(ta, tb, 0)
+    return np.array([pt[t] for t in out])
 
 
 # ---------- атрибуты объекта ----------
@@ -439,6 +472,7 @@ def object_record(o, tables, parent_style=None):
     st = resolve_style(tables, a, parent_style)
     m = tables.material(st["material"])
     return {
+        "material_source": enum_name(a.MaterialSource), "locked": enum_name(a.Mode) == "Locked",
         "id": str(a.Id), "name": a.Name or "", "kind": geometry_kind(o.Geometry),
         "layer_index": a.LayerIndex, "layer": tables.layer_path(a.LayerIndex),
         "display": st["display"], "object_color": st["object"], "color_source": st["color_source"],
@@ -448,6 +482,44 @@ def object_record(o, tables, parent_style=None):
         "groups": [tables.groups[g] for g in a.GetGroupList() if 0 <= g < len(tables.groups)],
         "visible": bool(a.Visible), "style": st,
     }
+
+
+def apply_parent(rec, parent):
+    """Объект определения блока со стилем «By Parent» получает цвет/материал вставки (копия записи)."""
+    if parent is None:
+        return rec
+    out = dict(rec)
+    if rec.get("color_source") == "ColorFromParent":
+        out["display"] = parent["display"]
+    if rec.get("material_source") == "MaterialFromParent":
+        for k in ("material_index", "material", "transparency"):
+            out[k] = parent[k]
+    return out
+
+
+def uses_parent(f, tables, idef_id, depth=0, _memo=None):
+    """Есть ли в определении блока (с учётом вложенных) объекты «By Parent» — тогда вид зависит от вставки."""
+    _memo = {} if _memo is None else _memo
+    if idef_id in _memo:
+        return _memo[idef_id]
+    _memo[idef_id] = False
+    d = tables.idefs.get(idef_id)
+    res = False
+    if d is not None and depth < 16:
+        for oid in d.GetObjectIds():
+            o = f.Objects.FindId(oid)
+            if o is None:
+                continue
+            a = o.Attributes
+            if enum_name(a.ColorSource) == "ColorFromParent" or enum_name(a.MaterialSource) == "MaterialFromParent":
+                res = True
+                break
+            g = o.Geometry
+            if isinstance(g, _r().InstanceReference) and uses_parent(f, tables, str(g.ParentIdefId), depth + 1, _memo):
+                res = True
+                break
+    _memo[idef_id] = res
+    return res
 
 
 # ---------- извлечение геометрии ----------
@@ -463,6 +535,7 @@ class Options(object):
     skiphidden = False
     skiplocked = False
     types = {"surfaces", "meshes", "subd", "curves", "points", "blocks"}
+    curvetol = 0.0            # допуск полилиний, единицы модели (0 = 1 мм)
 
 
 KIND_TYPE = {
@@ -567,7 +640,7 @@ def geometry_parts(g, opt, stats):
         return [{"t": "mesh", "v": res[0], "f": res[1], "face": -1, "subd": True}]
     if isinstance(g, r.Curve):
         if isinstance(g, (r.LineCurve, r.PolylineCurve)) or opt.curves == "poly":
-            v = sample_curve(g)
+            v = sample_curve(g, opt.curvetol)
             closed = bool(g.IsClosed) and len(v) > 2
             if closed and np.allclose(v[0], v[-1]):
                 v = v[:-1]
@@ -590,6 +663,25 @@ def geometry_parts(g, opt, stats):
     return []
 
 
+def type_allowed(g, opt):
+    kind = geometry_kind(g)
+    typ = KIND_TYPE.get(kind)
+    if typ is None and isinstance(g, _r().Curve):
+        typ = "curves"
+    return typ is None or typ in opt.types
+
+
+def visibility_allowed(tables, a, skiphidden, skiplocked):
+    """Скрытый/заблокированный слой (с учётом родителей) или объект."""
+    vis, locked = tables.layer_visible(a.LayerIndex)
+    mode = enum_name(a.Mode)
+    if skiphidden and (not vis or not a.Visible or mode == "Hidden"):
+        return False
+    if skiplocked and (locked or mode == "Locked"):
+        return False
+    return True
+
+
 def iter_objects(f, opt, tables=None, stats=None):
     """Объекты модели (не из определений блоков) -> записи с частями геометрии."""
     tables = tables or Tables(f)
@@ -602,13 +694,9 @@ def iter_objects(f, opt, tables=None, stats=None):
         kind = geometry_kind(o.Geometry)
         if kind in INFO_KINDS:
             continue
-        typ = KIND_TYPE.get(kind)
-        if typ is None and isinstance(o.Geometry, _r().Curve):
-            typ = "curves"
-        if typ is not None and typ not in opt.types:
+        if not type_allowed(o.Geometry, opt):
             continue
-        vis, locked = tables.layer_visible(a.LayerIndex)
-        if (opt.skiphidden and (not vis or not a.Visible)) or (opt.skiplocked and locked):
+        if not visibility_allowed(tables, a, opt.skiphidden, opt.skiplocked):
             continue
         if not lay_ok(tables.layer_path(a.LayerIndex)):
             continue
@@ -627,6 +715,12 @@ def block_definition(f, tables, idef_id, opt, stats, cache):
         for oid in d.GetObjectIds():
             o = f.Objects.FindId(oid) if hasattr(f.Objects, "FindId") else None
             if o is None:
+                continue
+            # содержимое блоков: те же фильтры типов и видимости слоёв, что у объектов модели
+            # (глобы слоёв относятся только к объектам модели — вставка уже прошла фильтр)
+            if not type_allowed(o.Geometry, opt):
+                continue
+            if not visibility_allowed(tables, o.Attributes, opt.skiphidden, opt.skiplocked):
                 continue
             rec = object_record(o, tables)
             rec["parts"] = geometry_parts(o.Geometry, opt, stats)
@@ -675,7 +769,7 @@ def file_bbox(f):
 
 # ---------- информация: тексты, размеры, точки, свет ----------
 
-def info_records(f, tables, want, layer_ok=None, skiphidden=False):
+def info_records(f, tables, want, layer_ok=None, skiphidden=False, skiplocked=False):
     """Тексты, метки, размеры, выноски, точки, свет -> записи для выхода Info (мировые координаты)."""
     r = _r()
     out = []
@@ -686,7 +780,7 @@ def info_records(f, tables, want, layer_ok=None, skiphidden=False):
         g = o.Geometry
         if layer_ok is not None and not layer_ok(tables.layer_path(a.LayerIndex)):
             continue
-        if skiphidden and not tables.layer_visible(a.LayerIndex)[0]:
+        if not visibility_allowed(tables, a, skiphidden, skiplocked):
             continue
         rec = None
         if isinstance(g, r.TextDot) and "dots" in want:

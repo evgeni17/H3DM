@@ -23,9 +23,19 @@ File Info:
     Object counts by type, units, render meshes, trimmed faces, Cyrillic names and the layer tree.
 Surface Output:
     *NURBS Patches* — every Brep face becomes a Houdini NURBS surface with the exact degree, knots and weights.
-    Trimmed faces are tessellated, or (with __Trimmed Faces as Untrimmed NURBS + Boundary Curves__) kept as the full
-    untrimmed surface plus their boundary curves. *Polygons* — render meshes stored in the file, or H3DM's own
-    tessellation when the file has none. *Packed* — one packed primitive per Rhino object; blocks become packed instances.
+    Trimmed faces use the render mesh stored in the file, or (with __Trimmed Faces as Untrimmed NURBS + Boundary
+    Curves__) the full untrimmed surface plus its boundary curves — the trimmed shape itself is not rebuilt.
+    *Polygons* — render meshes stored in the file; untrimmed faces without one are converted by Houdini, trimmed faces
+    without one are skipped with a warning (own tessellation comes in 0.3). *Packed* — one packed primitive per Rhino
+    object; blocks become packed instances (with Blocks = Expand, every block object is its own packed primitive).
+Skip Hidden / Skip Locked:
+    Applied the same way to the Geometry and Info outputs and to objects inside blocks (an object on a hidden or
+    locked layer is skipped; block objects follow their own layer, as in Rhino).
+User Text:
+    `d@user_text` keeps every value as text. With __User Text to Attributes__ each key becomes an attribute;
+    __Detect Numbers__ makes integers (int32, no leading zeros) and short decimals (up to 7 digits) numeric,
+    everything else stays text, so IDs like `007` or `123456789012` are never rounded. __Keep as Text__ forces keys
+    to text. Keys that clash with Houdini names get the prefix `ut_` (`name` -> `ut_name`), clashes get `_2`.
 Non-Latin Names:
     *Keep*, *Transliterate* or *Transliterate, Keep Original* (`layer_orig`, `name_orig`, detail `h3dm_name_map`).
     Group names and attribute names made from User Text keys are always transliterated, because Houdini allows only
@@ -98,9 +108,20 @@ File Info:
     Число объектов по типам, единицы, наличие render mesh, обрезанные грани, кириллические имена и дерево слоёв.
 Surface Output:
     *NURBS Patches* — каждая грань Brep становится NURBS-поверхностью Houdini с точными степенью, узлами и весами.
-    Обрезанные грани разбиваются на полигоны или (галочка __Trimmed Faces as Untrimmed NURBS + Boundary Curves__)
-    остаются полной необрезанной поверхностью плюс кривые границ. *Polygons* — сетки отображения из файла или
-    собственное разбиение H3DM, если сеток в файле нет. *Packed* — по packed-примитиву на объект Rhino, блоки — packed-экземпляры.
+    Обрезанные грани берутся сетками отображения из файла или (галочка __Trimmed Faces as Untrimmed NURBS + Boundary
+    Curves__) остаются полной необрезанной поверхностью плюс кривые границ — сама обрезанная форма не строится.
+    *Polygons* — сетки отображения из файла; необрезанные грани без сетки конвертирует Houdini, обрезанные без сетки
+    пропускаются с предупреждением (своё разбиение — в 0.3). *Packed* — по packed-примитиву на объект Rhino, блоки —
+    packed-экземпляры (при Blocks = Expand каждый объект блока — свой packed-примитив).
+Skip Hidden / Skip Locked:
+    Одинаково для выходов Geometry и Info и для объектов внутри блоков (объект на скрытом или заблокированном слое
+    пропускается; объекты блока подчиняются своему слою, как в Rhino).
+User Text:
+    `d@user_text` хранит все значения текстом. С __User Text to Attributes__ каждый ключ — отдельный атрибут;
+    __Detect Numbers__ делает числами только целые (int32, без ведущих нулей) и короткие дроби (до 7 цифр), остальное
+    остаётся текстом — идентификаторы вроде `007` или `123456789012` не округляются. __Keep as Text__ принудительно
+    оставляет ключи текстом. Ключи, совпадающие с именами Houdini, получают префикс `ut_` (`name` -> `ut_name`),
+    совпадения — суффикс `_2`.
 Non-Latin Names:
     *Keep* (оставить), *Transliterate* (транслит) или *Transliterate, Keep Original* (транслит + оригинал в
     `layer_orig`, `name_orig`, detail `h3dm_name_map`). Имена групп и атрибутов из ключей User Text транслитерируются

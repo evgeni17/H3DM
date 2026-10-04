@@ -3,7 +3,7 @@
 H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It uses
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino.
 
-> **Status: 0.2.0 — import works, export is in development.** Geometry (NURBS, meshes, curves, points, blocks),
+> **Status: 0.2.1 — import works, export is in development.** Geometry (NURBS, meshes, curves, points, blocks),
 > attributes, Cyrillic names, the *Info* output and the global transform for far-away models are done.
 
 Русская версия: [README.ru.md](README.ru.md).
@@ -23,7 +23,8 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 * **NURBS:** Brep faces become Houdini NURBS surfaces with the exact degree, knots and weights. Trimmed faces are
   tessellated, or kept as the untrimmed surface plus boundary curves (switch). Export writes NURBS surfaces
   untrimmed, with their boundary curves next to them.
-* **Polygons:** render meshes stored in the file, or H3DM's own tessellation for files saved without them.
+* **Polygons:** render meshes stored in the file. Files saved without them (*Save Small*): untrimmed faces are
+  converted by Houdini, trimmed faces are skipped with a warning until H3DM's own tessellation (0.3).
 * **Far from the origin:** the shift to the origin is computed in double precision before positions become float32;
   the import has an *Xform* output, the export an *Xform* input that writes back to the original coordinates.
 * **Non-Latin names:** Cyrillic layer, object, group and material names can be transliterated; the originals are

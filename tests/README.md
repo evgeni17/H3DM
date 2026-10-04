@@ -6,6 +6,9 @@
   `h3dm_trimmed_v001.igs` — the same trimmed Breps as IGES, for comparison with Houdini's `giges`.
   The published fixtures were passed through `sanitize_3dm.py` (no author, paths or plug-in data).
 * `sanitize_3dm.py in.3dm out.3dm` — copies a file without author/path metadata, e.g. before sharing a test file.
+* `make_edgecases.py` — builds `fixtures/h3dm_edgecases_v001.3dm` with rhino3dm only: periodic NURBS, name and
+  User Text collisions, long numeric IDs, By Parent blocks, coloured clouds next to coloured meshes, hidden/locked
+  objects and layers.
 * `private/` — your own files for local testing (git-ignored).
 
 ```bash

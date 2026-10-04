@@ -59,6 +59,28 @@ m3 = names.NameMapper(names.MODE_KEEP)
 eq(m3.layer("Фасад::Панели"), "Фасад::Панели", "keep mode")
 eq(m3.group("Группа 1"), "Gruppa_1", "group always safe")
 
+# латинские имена резервируются раньше транслита; порядок детерминирован
+m4 = names.NameMapper()
+m4.prepare_layers(["Корень", "Корень::Еда", "Корень::Эда", "Koren", "Koren::Eda", "Koren::Eda_2"])
+got = [m4.layer(p) for p in ["Корень::Еда", "Корень::Эда", "Koren::Eda", "Koren::Eda_2"]]
+eq(len(set(got)), 4, "layers unique: %s" % got)
+eq(got[2:], ["Koren::Eda", "Koren::Eda_2"], "latin layers keep their names")
+m4.prepare_names(["Еда", "Эда", "Eda", "Eda_2"])
+got = [m4.name(x) for x in ["Еда", "Эда", "Eda", "Eda_2"]]
+eq(len(set(got)), 4, "names unique: %s" % got)
+eq(got[2:], ["Eda", "Eda_2"], "latin names keep their names")
+# префикс ut_ ставится до проверки уникальности
+m4.prepare_attribs(["name", "ut_name", "id"], {"name", "layer"})
+got = [m4.attrib(x, {"name", "layer"}) for x in ["name", "ut_name", "id"]]
+eq(len(set(got)), 3, "attribs unique: %s" % got)
+eq(got[1:], ["ut_name", "id"], "existing ut_name keeps its name")
+
+# числа User Text: только без потерь
+for vals, kind in ((["123456789"], "int"), (["42", "-7"], "int"), (["007"], None), (["12345678901"], None),
+                   (["0.25", "1.5"], "float"), (["3.14159265"], None), (["1e3"], "float"), (["P-001"], None),
+                   (["12", "3.5"], "float"), ([""], None), (["0"], "int")):
+    eq(names.number_kind(vals), kind, "number_kind %s" % vals)
+
 if FAIL:
     print("FAILED (%d):" % len(FAIL))
     for f in FAIL:

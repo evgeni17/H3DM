@@ -122,17 +122,18 @@ def safe_identifier(s, translit_first=True, translit=None):
 MODE_KEEP, MODE_TRANSLIT, MODE_TRANSLIT_KEEP = "keep", "translit", "translit_keep"
 
 
-class NameMapper:
+class NameMapper(object):
     """Переводит имена в латиницу и следит за коллизиями внутри области (scope).
 
-    scope — например, путь родительского слоя: соседние слои не должны совпасть.
-    Коллизия: суффикс _2, _3... и запись в warnings.
+    Коллизии: суффикс _2, _3... и запись в warnings. Чтобы транслит не занял имя, которое уже есть
+    в файле латиницей (Еда -> Eda при существующем Eda), вызывайте prepare_*() со всеми именами файла
+    до первого обращения: неизменные (латинские) имена резервируются первыми.
     """
 
     def __init__(self, mode=MODE_TRANSLIT_KEEP, case_rule=CASE_KEEP):
         self.mode = mode
         self.case_rule = case_rule
-        self.map = {}          # латиница -> оригинал (для detail-атрибута и обратного экспорта)
+        self.map = {}          # результат -> оригинал (для detail-атрибута и обратного экспорта)
         self.warnings = []
         self._scopes = {}      # scope -> {результат: оригинал}
         self._cache = {}
@@ -150,63 +151,116 @@ class NameMapper:
         while used.get("%s_%d" % (name, k), original) != original:
             k += 1
         new = "%s_%d" % (name, k)
-        self.warnings.append("name collision in '%s': '%s' -> '%s'" % (scope, original, new))
+        self.warnings.append("name collision in '%s': '%s' -> '%s'" % (scope[-1] if scope else "", original, new))
         used[new] = original
         return new
 
-    def name(self, original, scope=""):
-        """Имя объекта/материала/блока."""
-        if not self.active or not has_cyrillic(original):
-            return original
-        key = ("n", scope, original)
+    def _resolve(self, key, scope, original, candidate):
         if key not in self._cache:
-            res = self._unique(("n", scope), original, translit(original))
-            self.map[res] = original
+            res = self._unique(scope, original, candidate)
+            if res != original:
+                self.map[res] = original
             self._cache[key] = res
         return self._cache[key]
 
+    # ---------- объекты, материалы, блоки
+    def _name_candidate(self, original):
+        return translit(original) if (self.active and has_cyrillic(original)) else original
+
+    def prepare_names(self, originals, scope=""):
+        """Зарезервировать неизменные имена раньше транслитерированных."""
+        uniq = list(dict.fromkeys(o for o in originals if o))
+        for o in sorted(uniq, key=lambda o: self._name_candidate(o) != o):
+            self.name(o, scope)
+
+    def name(self, original, scope=""):
+        if not original:
+            return original
+        return self._resolve(("n", scope, original), ("n", scope), original, self._name_candidate(original))
+
+    # ---------- слои
+    def prepare_layers(self, full_paths, sep=SEP):
+        """Все пути слоёв файла: по уровням, внутри уровня сначала неизменные имена."""
+        # порядок — как в файле (детерминированно), уровни — от корня
+        paths = sorted(dict.fromkeys(p for p in full_paths if p), key=lambda p: p.count(sep))
+        by_depth = {}
+        for p in paths:
+            by_depth.setdefault(p.count(sep), []).append(p)
+        for d in sorted(by_depth):
+            group = by_depth[d]
+            cands = {p: self._segment_candidate(p, sep) for p in group}
+            for p in sorted(group, key=lambda p: cands[p] != p.split(sep)[-1]):
+                self.layer(p, sep)
+
+    def _segment_candidate(self, full_path, sep):
+        segs = full_path.split(sep)
+        if not self.active:
+            return segs[-1]
+        return apply_case([translit(x) for x in segs], self.case_rule)[-1]
+
     def layer(self, full_path, sep=SEP):
-        """Полный путь слоя 'Фасад::Панели' -> 'Fasad::Paneli' (по сегментам, с уникальностью среди соседей)."""
+        """Полный путь слоя 'Фасад::Панели' -> 'Fasad::Paneli' (уникально среди соседей)."""
         if not full_path:
             return full_path
         key = ("l", full_path)
         if key in self._cache:
             return self._cache[key]
         segs = full_path.split(sep)
-        if not self.active:
-            out = segs
-        else:
-            tr = [translit(s) for s in segs]
-            tr = apply_case(tr, self.case_rule)
-            out = []
-            for i, (orig, new) in enumerate(zip(segs, tr)):
-                parent = sep.join(out)
-                if new != orig:
-                    new = self._unique(("l", parent), orig, new)
-                    self.map[new] = orig
-                out.append(new)
-        res = sep.join(out)
+        parent = self.layer(sep.join(segs[:-1]), sep) if len(segs) > 1 else ""
+        cand = self._segment_candidate(full_path, sep)
+        res_seg = self._unique(("l", parent), segs[-1], cand)
+        if res_seg != segs[-1]:
+            self.map[res_seg] = segs[-1]
+        res = (parent + sep + res_seg) if parent else res_seg
         self._cache[key] = res
         return res
 
-    def group(self, original):
-        """Имя группы Houdini — всегда безопасный идентификатор (кириллица всегда транслитерируется)."""
-        key = ("g", original)
-        if key not in self._cache:
-            base = safe_identifier(original, translit_first=True) or "group"
-            res = self._unique(("g",), original, base)
-            if res != original:
-                self.map[res] = original
-            self._cache[key] = res
-        return self._cache[key]
+    # ---------- группы и атрибуты (всегда безопасные идентификаторы)
+    def _ident_candidate(self, original, reserved=(), prefix="ut_"):
+        base = safe_identifier(original, translit_first=True) or "key"
+        return (prefix + base) if base in reserved else base
 
-    def attrib(self, original):
-        """Имя атрибута из ключа User Text — всегда безопасный идентификатор."""
-        key = ("a", original)
-        if key not in self._cache:
-            base = safe_identifier(original, translit_first=True) or "key"
-            res = self._unique(("a",), original, base)
-            if res != original:
-                self.map[res] = original
-            self._cache[key] = res
-        return self._cache[key]
+    def prepare_groups(self, originals):
+        uniq = list(dict.fromkeys(o for o in originals if o))
+        for o in sorted(uniq, key=lambda o: self._ident_candidate(o) != o):
+            self.group(o)
+
+    def group(self, original):
+        return self._resolve(("g", original), ("g",), original, self._ident_candidate(original) or "group")
+
+    def prepare_attribs(self, originals, reserved=()):
+        uniq = list(dict.fromkeys(o for o in originals if o))
+        for o in sorted(uniq, key=lambda o: self._ident_candidate(o, reserved) != o):
+            self.attrib(o, reserved)
+
+    def attrib(self, original, reserved=()):
+        """Имя атрибута из ключа User Text. Префикс ut_ для занятых имён ставится ДО проверки уникальности."""
+        return self._resolve(("a", original), ("a",), original, self._ident_candidate(original, reserved))
+
+
+# ---------- значения User Text ----------
+
+_INT_RE = re.compile(r"^[+-]?(0|[1-9][0-9]*)$")
+_FLOAT_RE = re.compile(r"^[+-]?(0|[1-9][0-9]*)?(\.[0-9]+)?([eE][+-]?[0-9]+)?$")
+
+
+def number_kind(values):
+    """'int' | 'float' | None для набора строк User Text.
+
+    Числами становятся только значения, которые атрибут Houdini хранит без искажений:
+    целые без ведущих нулей в пределах int32, дробные — не больше 7 значащих цифр (float32).
+    Остальное («007», «123456789012», длинные дроби) остаётся строкой.
+    """
+    vals = [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
+    if not vals:
+        return None
+    if all(_INT_RE.match(v) for v in vals):
+        return "int" if all(-2 ** 31 <= int(v) < 2 ** 31 for v in vals) else None
+    for v in vals:
+        if not _FLOAT_RE.match(v) or not any(ch.isdigit() for ch in v):
+            return None
+        mant = v.lstrip("+-").split("e")[0].split("E")[0]
+        digits = mant.replace(".", "").lstrip("0")
+        if len(digits) > 7:
+            return None
+    return "float"

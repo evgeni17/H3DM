@@ -38,7 +38,7 @@ def install(upgrade=False, log=print):
         raise RuntimeError("Houdini Python not found (HFS=%s)" % os.environ.get("HFS"))
     # pip может отсутствовать во встроенном Python
     subprocess.call([py, "-m", "ensurepip", "--user"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    cmd = [py, "-m", "pip", "install", "--target", target, "--no-warn-script-location", "--no-deps", "rhino3dm"]
+    cmd = [py, "-m", "pip", "install", "--target", target, "--no-warn-script-location", "--no-deps", "rhino3dm>=8,<9"]
     if upgrade:
         cmd.insert(4, "--upgrade")
     log("[H3DM] " + " ".join(cmd))
