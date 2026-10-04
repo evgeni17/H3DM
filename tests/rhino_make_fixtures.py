@@ -6,6 +6,7 @@
 материалы, Document User Text, сетки отображения; сохраняет в tests/fixtures:
   h3dm_fixture_v001.3dm        — с render mesh
   h3dm_fixture_small_v001.3dm  — без render mesh (как Save Small)
+Перед публикацией файлы очищаются от автора и путей: python tests/sanitize_3dm.py in.3dm out.3dm
 """
 import os
 
@@ -19,7 +20,7 @@ except NameError:
     doc = Rhino.RhinoDoc.ActiveDoc
 
 OUT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fixtures") if "__file__" in globals() else \
-    os.path.expanduser("~/tools_houdini/_github/H3DM/tests/fixtures")
+    os.path.join(os.getcwd(), "fixtures")
 D = System.Drawing.Color
 P = G.Point3d
 
