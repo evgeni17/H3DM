@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<shelfDocument>
+  <toolshelf name="h3dm" label="H3DM">
+    <memberTool name="h3dm_import_3dm"/>
+    <memberTool name="h3dm_export_3dm"/>
+    <memberTool name="h3dm_attr_template"/>
+    <memberTool name="h3dm_attr_guide"/>
+    <memberTool name="h3dm_about"/>
+  </toolshelf>
+
+  <tool name="h3dm_import_3dm" label="Import 3dm" icon="SOP_file">
+    <helpText><![CDATA[Pick a Rhino .3dm file and create a H3DM 3dm Import node.]]></helpText>
+    <script scriptType="python"><![CDATA[import h3dm.tools as t
+t.import_3dm(kwargs)]]></script>
+  </tool>
+
+  <tool name="h3dm_export_3dm" label="Export 3dm" icon="SOP_rop_geometry">
+    <helpText><![CDATA[Append a H3DM 3dm Export node to the selected SOP.]]></helpText>
+    <script scriptType="python"><![CDATA[import h3dm.tools as t
+t.export_selected(kwargs)]]></script>
+  </tool>
+
+  <tool name="h3dm_attr_template" label="3dm Attributes" icon="SOP_attribwrangle">
+    <helpText><![CDATA[Append a Primitive Wrangle with a template of all attributes understood by the 3dm export.]]></helpText>
+    <script scriptType="python"><![CDATA[import h3dm.tools as t
+t.attribute_template(kwargs)]]></script>
+  </tool>
+
+  <tool name="h3dm_attr_guide" label="3dm Guide" icon="BUTTONS_help">
+    <helpText><![CDATA[Open the attribute guide (help of H3DM 3dm Export).]]></helpText>
+    <script scriptType="python"><![CDATA[import h3dm.tools as t
+t.attribute_guide(kwargs)]]></script>
+  </tool>
+
+  <tool name="h3dm_about" label="H3DM Info" icon="MISC_python">
+    <script scriptType="python"><![CDATA[import h3dm.tools as t
+t.about(kwargs)]]></script>
+  </tool>
+</shelfDocument>

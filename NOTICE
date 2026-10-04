@@ -1,0 +1,19 @@
+H3DM — Rhino .3dm import/export for SideFX Houdini
+Copyright 2026 EOK (https://github.com/evgeni17) and H3DM contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This product does NOT include third-party code in its source tree. At runtime it
+uses the following third-party software, which is installed separately by the
+user (see THIRD_PARTY_NOTICES.md for details):
+
+  - rhino3dm (Robert McNeel & Associates) — MIT
+    https://github.com/mcneel/rhino3dm  (includes openNURBS)
+  - NumPy (bundled with Houdini) — BSD-3-Clause
+
+H3DM is an independent project. It is not affiliated with, endorsed or
+sponsored by SideFX (Side Effects Software Inc.) or Robert McNeel & Associates.
+"Houdini" and "SideFX" are trademarks of Side Effects Software Inc.
+"Rhinoceros", "Rhino" and "openNURBS" are trademarks of Robert McNeel & Associates.
+All other trademarks are the property of their respective owners and are used
+here for identification purposes only.

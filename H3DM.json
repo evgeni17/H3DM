@@ -1,0 +1,9 @@
+{
+    "enable": true,
+    "load_package_once": true,
+    "env": [
+        {"H3DM": "/path/to/H3DM"},
+        {"H3DM_HELP_LANG": "en"}
+    ],
+    "path": "$H3DM"
+}

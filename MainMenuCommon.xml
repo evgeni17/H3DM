@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mainMenu>
+  <menuBar>
+    <subMenu id="h3dm_menu">
+      <label>H3DM</label>
+      <insertBefore>help_menu</insertBefore>
+      <scriptItem id="h3dm_import">
+        <label>Import 3dm...</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.import_3dm(kwargs)]]></scriptCode>
+      </scriptItem>
+      <scriptItem id="h3dm_export">
+        <label>Export Selected SOP to 3dm</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.export_selected(kwargs)]]></scriptCode>
+      </scriptItem>
+      <separatorItem/>
+      <scriptItem id="h3dm_template">
+        <label>Create Attribute Template</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.attribute_template(kwargs)]]></scriptCode>
+      </scriptItem>
+      <scriptItem id="h3dm_guide">
+        <label>Attribute Guide (Help)</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.attribute_guide(kwargs)]]></scriptCode>
+      </scriptItem>
+      <separatorItem/>
+      <scriptItem id="h3dm_rebuild">
+        <label>Rebuild HDAs</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.rebuild_hdas(kwargs)]]></scriptCode>
+      </scriptItem>
+      <scriptItem id="h3dm_deps">
+        <label>Install / Update rhino3dm</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.install_deps(kwargs)]]></scriptCode>
+      </scriptItem>
+      <scriptItem id="h3dm_about">
+        <label>About H3DM</label>
+        <scriptCode><![CDATA[import h3dm.tools as t; t.about(kwargs)]]></scriptCode>
+      </scriptItem>
+    </subMenu>
+  </menuBar>
+</mainMenu>
