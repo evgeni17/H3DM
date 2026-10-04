@@ -42,6 +42,39 @@ Layer Case:
 Detail: `d@rhino_doc` (units, tolerances, authors, earth anchor), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
 `d[]@rhino_blocks`, `d@h3dm_name_map`.
+
+@inputs
+
+Xform:
+    Optional. The *Xform* output of another H3DM 3dm Import. Its shift is used instead of the Global Transform tab,
+    so several Rhino files of one project land in the same Houdini coordinates.
+
+@outputs
+
+Geometry:
+    Surfaces, meshes, curves, point clouds, blocks.
+Info:
+    Points for text dots, texts, dimensions, leaders, named points, lights and (optionally) block insertion points:
+    `s@info_type`, `s@text`, `s@text2`, `s@rich_text`, `f@text_height`, `f@measurement` (meters), `N`/`up`
+    (text plane), `3@transform` (blocks), lights: `s@light_style`, `v@light_color`, `f@intensity`, `v@direction`.
+Xform:
+    One point with the global transform: `d@h3dm_xform` (exact, double precision), `s@h3dm_origin`,
+    `4@global_xform`. Connect it to the second input of H3DM 3dm Export to write back to the original coordinates,
+    or to the input of another import.
+
+@global Global transform (models far from the origin)
+
+Rhino stores coordinates in double precision, Houdini stores positions in float32 (about 7 significant digits).
+A model 300 km from the origin loses centimetres in float32. H3DM subtracts an origin point *in double precision*
+before positions are stored:
+
+    P_houdini = axes * scale * (P_rhino - origin)
+
+*Auto When Far From Origin* (default) shifts only models that extend further than __Far Threshold__; the origin is the
+bounding box centre in X/Y and its bottom in Z, rounded to __Round To__ (1 m), so the shift is a clean number.
+The exact origin is kept in `d@h3dm_xform` / `s@h3dm_origin` (dictionary and string attributes keep double
+precision). `4@global_xform` is the same move as a float32 matrix for Transform By Attribute — fine for viewing,
+not exact for far models.
 """
 
 HELP_IMPORT_RU = u"""= H3DM 3dm Import =
@@ -84,6 +117,37 @@ Layer Case:
 Detail: `d@rhino_doc` (единицы, допуски, авторы, гео-привязка), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
 `d[]@rhino_blocks`, `d@h3dm_name_map`.
+
+@inputs
+
+Xform:
+    Необязательный. Выход *Xform* другого H3DM 3dm Import. Его сдвиг используется вместо вкладки Global Transform —
+    несколько файлов Rhino одного проекта встают в одни и те же координаты Houdini.
+
+@outputs
+
+Geometry:
+    Поверхности, сетки, кривые, облака точек, блоки.
+Info:
+    Точки текстовых меток, текстов, размеров, выносок, именованных точек, источников света и (по выбору) вставок
+    блоков: `s@info_type`, `s@text`, `s@text2`, `s@rich_text`, `f@text_height`, `f@measurement` (метры), `N`/`up`
+    (плоскость текста), `3@transform` (блоки), свет: `s@light_style`, `v@light_color`, `f@intensity`, `v@direction`.
+Xform:
+    Одна точка с глобальным трансформом: `d@h3dm_xform` (точно, double), `s@h3dm_origin`, `4@global_xform`.
+    Подключите её ко второму входу H3DM 3dm Export — экспорт вернёт исходные координаты; или ко входу другого импорта.
+
+@global Глобальный трансформ (модели далеко от нуля)
+
+Rhino хранит координаты в double (64 бита), Houdini — позиции во float32 (32 бита, ~7 значащих цифр).
+Модель в 300 км от нуля теряет во float32 сантиметры. H3DM вычитает точку origin *в двойной точности*
+до записи позиций:
+
+    P_houdini = оси * масштаб * (P_rhino - origin)
+
+*Auto When Far From Origin* (по умолчанию) сдвигает только модели дальше __Far Threshold__; origin — центр габарита
+по X/Y и его низ по Z, округлённый до __Round To__ (1 м), чтобы сдвиг был «круглым». Точный origin хранится в
+`d@h3dm_xform` / `s@h3dm_origin` (dict- и строковые атрибуты держат double). `4@global_xform` — тот же сдвиг
+матрицей float32 для Transform By Attribute: годится для просмотра, но для далёких моделей неточен.
 """
 
 HELP_EXPORT_EN = u"""= H3DM 3dm Export =
@@ -108,6 +172,9 @@ HELP_EXPORT_EN = u"""= H3DM 3dm Export =
 | `s@text` on points | Text dots |
 
 NURBS surfaces are written as untrimmed surfaces; with __Trim Curves__ their boundary curves are written next to them.
+
+Input 2 (*Xform*, optional): the *Xform* output of H3DM 3dm Import. The shift is added back in double precision,
+so the file lands in the original Rhino coordinates.
 Use __H3DM > Create Attribute Template__ for a ready-made Primitive Wrangle.
 """
 
@@ -133,6 +200,9 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
 | `s@text` на точках | текстовые метки (TextDot) |
 
 NURBS-поверхности пишутся необрезанными; с галочкой __Trim Curves__ рядом пишутся кривые их границ.
+
+Вход 2 (*Xform*, необязательный): выход *Xform* ноды H3DM 3dm Import. Сдвиг возвращается в двойной точности —
+файл встаёт в исходные координаты Rhino.
 Готовый Primitive Wrangle — __H3DM > Create Attribute Template__.
 """
 

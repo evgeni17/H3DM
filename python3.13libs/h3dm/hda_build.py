@@ -25,6 +25,10 @@ INFO_CODE = """# H3DM: чтение .3dm — тексты, точки, разм�
 import h3dm.sop_import as m
 m.cook(hou.pwd(), output=1)
 """
+XFORM_CODE = """# H3DM: глобальный трансформ (выход Xform) — точка с d@h3dm_xform (double)
+import h3dm.sop_import as m
+m.cook(hou.pwd(), output=2)
+"""
 
 PY = hou.scriptLanguage.Python
 HIDE = hou.parmCondType.HideWhen
@@ -133,11 +137,29 @@ def _import_ptg():
         _toggle("yup", "Z-Up to Y-Up", True),
         hou.FloatParmTemplate("scale", "Scale (units per meter)", 1, default_value=(1.0,), min=0.0001, max=1000.0,
                               help="Rhino model units are converted to meters, then multiplied by this value."),
-        _toggle("toorigin", "Move to Origin", False,
-                help="Moves the model so that its bounding box centre (bottom) is at the origin, in double precision. "
-                     "4@global_xform keeps the move back."),
     ]
     g.append(_folder("conv_f", "Conversion", cv))
+
+    gt = [
+        hou.LabelParmTemplate("gt_note", "Note", column_labels=(
+            "Rhino stores double precision, Houdini positions are float32. The shift is computed in double "
+            "BEFORE positions are stored. A connected Xform input (from another import) overrides this tab.",)),
+        _menu("xformmode", "Global Transform", [
+            ("auto_far", "Auto When Far From Origin"), ("auto", "Auto (bounding box)"),
+            ("basepoint", "Rhino Model Base Point"), ("manual", "Manual Origin"), ("none", "None (keep coordinates)")],
+            help="Which Rhino point becomes the Houdini origin. Auto = bounding box centre in X/Y and its bottom in Z, "
+                 "rounded to Round To."),
+        hou.FloatParmTemplate("farthreshold", "Far Threshold (meters)", 1, default_value=(1000.0,), min=0.0, max=100000.0,
+                              conditionals={HIDE: "{ xformmode != auto_far }"},
+                              help="Shift only if the model extends further than this from the origin."),
+        hou.FloatParmTemplate("roundto", "Round To (meters)", 1, default_value=(1.0,), min=0.0, max=10000.0,
+                              conditionals={HIDE: "{ xformmode != auto_far xformmode != auto }"},
+                              help="The origin is rounded to this step so the shift is a clean number. 0 = no rounding."),
+        hou.FloatParmTemplate("manualorigin", "Origin (model units)", 3, default_value=(0.0, 0.0, 0.0),
+                              conditionals={HIDE: "{ xformmode != manual }"},
+                              help="Rhino coordinates (model units) that become the Houdini origin."),
+    ]
+    g.append(_folder("xform_f", "Global Transform", gt))
     return g
 
 
@@ -158,8 +180,9 @@ def _export_ptg():
         _menu("unit", "Model Units", [("mm", "Millimeters"), ("cm", "Centimeters"), ("m", "Meters")]),
         hou.FloatParmTemplate("scale", "Scene Unit (meters)", 1, default_value=(1.0,), min=0.0001, max=1000.0),
         _toggle("yup", "Y-Up to Z-Up", True),
-        _toggle("fromorigin", "Undo Move to Origin (global_xform)", True,
-                help="If the geometry was imported with Move to Origin, put it back to its original place."),
+        _menu("xformsrc", "Global Transform", [("input2", "From Input 2 (Xform), else Input 1 Detail"),
+                                               ("detail", "From Input 1 Detail (h3dm_xform)"), ("none", "None")],
+              help="Puts the geometry back to its original Rhino coordinates. The shift is added in double precision."),
     ]
     g.append(_folder("units_f", "Units", un))
 
@@ -271,30 +294,34 @@ def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_te
 def build_import(otls=None):
     geo = _parent_geo()
     sub = geo.createNode("subnet", "rhino_import")
-    py0 = sub.createNode("python", "GEO")
-    py0.parm("python").set(GEO_CODE)
-    py1 = sub.createNode("python", "INFO")
-    py1.parm("python").set(INFO_CODE)
-    o0 = sub.createNode("output", "OUT_GEO")
-    o0.parm("outputidx").set(0)
-    o0.setInput(0, py0)
-    o1 = sub.createNode("output", "OUT_INFO")
-    o1.parm("outputidx").set(1)
-    o1.setInput(0, py1)
-    o0.setDisplayFlag(True)
+    if sub.parm("label1") is not None:
+        sub.parm("label1").set("Xform (optional)")
+    nodes = []
+    for i, (name, code) in enumerate((("GEO", GEO_CODE), ("INFO", INFO_CODE), ("XFORM", XFORM_CODE))):
+        py = sub.createNode("python", name)
+        py.parm("python").set(code)
+        py.setInput(0, sub.indirectInputs()[0])
+        o = sub.createNode("output", "OUT_" + name)
+        o.parm("outputidx").set(i)
+        o.setInput(0, py)
+        nodes.append(o)
+    nodes[0].setDisplayFlag(True)
     path = os.path.join(otls or OTLS, "h3dm_3dm_import.hda")
-    _finish(sub, IMPORT_TYPE, "H3DM 3dm Import", path, _import_ptg(), 0, 0, "SOP_file", HELP_IMPORT,
-            outputs=2, output_labels=("Geometry", "Info"))
+    _finish(sub, IMPORT_TYPE, "H3DM 3dm Import", path, _import_ptg(), 0, 1, "SOP_file", HELP_IMPORT,
+            outputs=3, output_labels=("Geometry", "Info", "Xform"))
     return path
 
 
 def build_export(otls=None):
     geo = _parent_geo()
     sub = geo.createNode("subnet", "rhino_export")
+    if sub.parm("label1") is not None:
+        sub.parm("label1").set("Geometry")
+        sub.parm("label2").set("Xform (optional)")
     out = sub.createNode("output", "OUT")
     out.setInput(0, sub.indirectInputs()[0])
     path = os.path.join(otls or OTLS, "h3dm_3dm_export.hda")
-    _finish(sub, EXPORT_TYPE, "H3DM 3dm Export", path, _export_ptg(), 1, 1, "SOP_rop_geometry", HELP_EXPORT)
+    _finish(sub, EXPORT_TYPE, "H3DM 3dm Export", path, _export_ptg(), 1, 2, "SOP_rop_geometry", HELP_EXPORT)
     return path
 
 

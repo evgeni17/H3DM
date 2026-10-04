@@ -8,4 +8,12 @@
 
 ```bash
 python tests/test_names.py      # transliteration and name rules (plain Python)
+python tests/test_xform.py      # global transform, float32 precision far from the origin (numpy)
+python tests/test_read.py       # reading the fixtures (rhino3dm + numpy)
+```
+
+In Houdini (Python Shell or `hython`):
+
+```python
+exec(open("<H3DM>/tests/houdini_regression.py").read())   # HDA modes, normals, groups, Info, Xform input
 ```

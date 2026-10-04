@@ -3,9 +3,8 @@
 H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It uses
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino.
 
-> **Status: 0.1.0 — early development.** The package, menu, nodes, installer and the document/table import
-> (units, layers, materials, groups, blocks, Document User Text, File Info) work. Geometry import and export
-> are being built, see the roadmap below.
+> **Status: 0.2.0 — import works, export is in development.** Geometry (NURBS, meshes, curves, points, blocks),
+> attributes, Cyrillic names, the *Info* output and the global transform for far-away models are done.
 
 Русская версия: [README.ru.md](README.ru.md).
 
@@ -25,6 +24,8 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
   tessellated, or kept as the untrimmed surface plus boundary curves (switch). Export writes NURBS surfaces
   untrimmed, with their boundary curves next to them.
 * **Polygons:** render meshes stored in the file, or H3DM's own tessellation for files saved without them.
+* **Far from the origin:** the shift to the origin is computed in double precision before positions become float32;
+  the import has an *Xform* output, the export an *Xform* input that writes back to the original coordinates.
 * **Non-Latin names:** Cyrillic layer, object, group and material names can be transliterated; the originals are
   kept and restored on export.
 
@@ -60,10 +61,9 @@ tests/                  fixtures made in Rhino 8, unit and Houdini tests
 
 | Version | Content |
 |---|---|
-| 0.1 | package, menu, shelf, installer, HDAs, document data and tables, File Info |
-| 0.1.x | import: layers, names, colours, groups, User Text, materials, Cyrillic names, meshes, curves, points |
-| 0.2 | *Info* output: texts, dots, dimensions, leaders, named points, lights, block insertion points |
-| 0.3 | exact NURBS surfaces and curves, trimmed-face tessellation, blocks as packed instances |
+| 0.1 ✓ | package, menu, shelf, installer, HDAs, document data and tables, File Info |
+| 0.2 ✓ | import: NURBS, meshes, curves, points, blocks, attributes, Cyrillic names, *Info* output, global transform |
+| 0.3 | own tessellation of trimmed faces (files saved without render meshes), disk cache, speed |
 | 0.4 | export of everything above |
 | 0.5 | tests, documentation, first public release |
 
