@@ -174,6 +174,14 @@ def _import_ptg():
               conditionals={DISABLE: "{ nonlatin == keep }"}),
         hou.StringParmTemplate("layersep", "Layer Separator", 1, default_value=("::",)),
         _toggle("pathattr", "Create path Attribute", True, help="s@path = /layer/.../name, compatible with HIFC."),
+        _toggle("layerlevels", "Create Layer Level Attributes", True, join_with_next=True,
+                help="Split s@layer into one string attribute per level: SC::STSZ::truby -> LL0 = SC, LL1 = STSZ, "
+                     "LL2 = truby. Shallower layers get empty strings on the deeper levels. Names are after "
+                     "transliteration and Layer Case, like s@layer."),
+        hou.StringParmTemplate("layerlevelprefix", "Prefix", 1, default_value=("LL",),
+                               conditionals={DISABLE: "{ layerlevels == 0 }"},
+                               help="Attribute names: <prefix>0, <prefix>1, ... User Text keys with these names get "
+                                    "the ut_ prefix."),
     ]
     g.append(_folder("names_f", "Names", nm))
 
@@ -337,14 +345,24 @@ soptoolutils.genericTool(kwargs, '$HDA_NAME')]]></script>
 
 def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_text, outputs=1, output_labels=None,
             on_created=None):
-    if os.path.exists(hda_path):
-        for existing in hou.hda.definitionsInFile(hda_path):
-            if existing.nodeTypeName() == type_name:
-                existing.destroy()
     node.setParmTemplateGroup(ptg)
-    hda = node.createDigitalAsset(name=type_name, hda_file_name=hda_path, description=label,
-                                  min_num_inputs=min_in, max_num_inputs=max_in, ignore_external_references=True)
-    d = hda.type().definition()
+    nt = hou.nodeType(hou.sopNodeTypeCategory(), type_name)
+    d = nt.definition() if nt is not None else None
+    if d is not None and os.path.normcase(os.path.abspath(d.libraryFilePath())) == os.path.normcase(os.path.abspath(hda_path)):
+        # определение уже загружено из этого файла: обновляем на месте. Удаление определения (как раньше)
+        # отвязывало ноды сцены, и их параметры сбрасывались к значениям по умолчанию.
+        d.updateFromNode(node)
+        d.setMinNumInputs(min_in)
+        d.setMaxNumInputs(max_in)
+        hda = node
+    else:
+        if os.path.exists(hda_path):
+            for existing in hou.hda.definitionsInFile(hda_path):
+                if existing.nodeTypeName() == type_name:
+                    existing.destroy()
+        hda = node.createDigitalAsset(name=type_name, hda_file_name=hda_path, description=label,
+                                      min_num_inputs=min_in, max_num_inputs=max_in, ignore_external_references=True)
+        d = hda.type().definition()
     # updateFromNode не синхронизирует интерфейс — пишем его в определение явно
     d.setParmTemplateGroup(ptg)
     d.setDescription(label)
@@ -364,7 +382,7 @@ def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_te
         d.addSection("OnCreated", on_created)
         d.setExtraFileOption("OnCreated/IsPython", True)
     d.addSection("Help", help_text)
-    d.save(hda_path, hda)
+    d.save(hda_path)
     return hda
 
 
@@ -404,11 +422,69 @@ def build_export(otls=None):
     return path
 
 
+def _snapshot():
+    """Значения параметров всех нод H3DM в сцене (страховка при пересборке определений)."""
+    out = {}
+    for tn in (IMPORT_TYPE, EXPORT_TYPE):
+        nt = hou.nodeType(hou.sopNodeTypeCategory(), tn)
+        if nt is None:
+            continue
+        for n in nt.instances():
+            vals = {}
+            for p in n.parms():
+                try:
+                    if p.parmTemplate().type() in (hou.parmTemplateType.Button, hou.parmTemplateType.Label,
+                                                   hou.parmTemplateType.Folder, hou.parmTemplateType.FolderSet,
+                                                   hou.parmTemplateType.Separator):
+                        continue
+                    try:
+                        vals[p.name()] = ("expr", p.expression(), p.expressionLanguage())
+                    except hou.OperationFailed:
+                        vals[p.name()] = ("raw", p.rawValue() if isinstance(p.eval(), str) else p.eval())
+                except Exception:
+                    pass
+            out[n.path()] = vals
+    return out
+
+
+def _restore(saved):
+    """Вернуть значения, если пересборка их изменила. -> число нод, где что-то восстановлено."""
+    count = 0
+    for path, vals in saved.items():
+        n = hou.node(path)
+        if n is None:
+            continue
+        changed = False
+        for name, v in vals.items():
+            p = n.parm(name)
+            if p is None:
+                continue
+            try:
+                if v[0] == "expr":
+                    try:
+                        same = p.expression() == v[1]
+                    except hou.OperationFailed:
+                        same = False
+                    if not same:
+                        p.setExpression(v[1], v[2])
+                        changed = True
+                else:
+                    cur = p.rawValue() if isinstance(v[1], str) else p.eval()
+                    if cur != v[1]:
+                        p.set(v[1])
+                        changed = True
+            except Exception:
+                pass
+        count += changed
+    return count
+
+
 def build_all(kwargs=None, otls=None, install=True):
     """otls — папка назначения (по умолчанию $H3DM/otls); install=False — не подгружать в сессию."""
     otls = otls or OTLS
     if not os.path.isdir(otls):
         os.makedirs(otls)
+    saved = _snapshot()
     paths = [build_import(otls), build_export(otls)]
     tmp = hou.node("/obj/__h3dm_build")
     if tmp is not None:
@@ -419,7 +495,10 @@ def build_all(kwargs=None, otls=None, install=True):
             hou.hda.reloadFile(p)
         else:
             hou.hda.uninstallFile(p)
+    restored = _restore(saved)
     msg = "H3DM HDAs built:\n" + "\n".join(paths)
+    if restored:
+        msg += "\nRestored parameter values on %d node(s)." % restored
     print("[H3DM] " + msg)
     if hou.isUIAvailable() and kwargs is not None:
         hou.ui.displayMessage(msg, title="H3DM")

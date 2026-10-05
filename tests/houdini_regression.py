@@ -546,4 +546,45 @@ def run_cache():
     return fails
 
 
-result = run() + run_edgecases() + run_v03() + run_prepare() + run_cache()
+def run_layer_levels():
+    """LL0, LL1, ...: уровни s@layer на примитивах, точках облаков и точках Info; префикс; выключение."""
+    fails = []
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_ll")
+    try:
+        n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("file").set(os.path.join(FX, "h3dm_fixture_v001.3dm"))
+        n.parm("diskcache").set(0)
+        if not n.evalParm("layerlevels"):
+            fails.append("layer levels: off by default")
+        for out_i, cls in ((0, "prim"), (1, "point")):
+            g = n.geometry(out_i)
+            find = g.findPrimAttrib if cls == "prim" else g.findPointAttrib
+            names = [a.name() for a in (g.primAttribs() if cls == "prim" else g.pointAttribs())]
+            lv = sorted([a for a in names if a.startswith("LL") and a[2:].isdigit()], key=lambda a: int(a[2:]))
+            if not lv:
+                fails.append("layer levels: none on output %d" % out_i)
+                continue
+            if lv != ["LL%d" % i for i in range(len(lv))]:
+                fails.append("layer levels: gaps %s" % lv)
+            elems = g.prims() if cls == "prim" else g.points()
+            for e in elems[:2000]:
+                layer = e.attribValue("layer")
+                parts = [e.attribValue(a) for a in lv]
+                if "::".join(p for p in parts if p) != layer or (layer and parts[0] == ""):
+                    fails.append("layer levels: %s -> %s" % (layer, parts))
+                    break
+        n.parm("layerlevelprefix").set("Lvl")
+        g = n.geometry(0)
+        if g.findPrimAttrib("Lvl0") is None or g.findPrimAttrib("LL0") is not None:
+            fails.append("layer levels: prefix not applied")
+        n.parm("layerlevels").set(0)
+        g = n.geometry(0)
+        if any(a.name().startswith("Lvl") for a in g.primAttribs()):
+            fails.append("layer levels: still written when off")
+    finally:
+        tmp.destroy()
+    print("houdini_regression layer levels: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+result = run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()

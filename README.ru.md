@@ -13,6 +13,7 @@ H3DM добавляет в SideFX Houdini импорт и экспорт фай�
 | Houdini | Rhino |
 |---|---|
 | primitive `s@layer` | слой, включая иерархию (`Родитель::Потомок`) |
+| primitive `s@LL0`, `s@LL1`, … | уровни слоя (`SC::STSZ::truby` → `SC`, `STSZ`, `truby`), только импорт |
 | primitive `s@name` | имя объекта |
 | primitive `v@Cd` | цвет объекта |
 | группы примитивов | группы объектов |

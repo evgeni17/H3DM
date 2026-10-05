@@ -8,6 +8,12 @@ Prepare in Rhino on a real model (123 MB, 114 Breps, 3873 faces) took 9 minutes 
   (`converting objects 57/114`, `meshing`, `writing the copy`) and the elapsed time.
 * **Rhino closed while working:** detected at once (the job used to wait for the full timeout).
 * *Stop Waiting* explains that Rhino keeps working and the finished copy is picked up by the next press.
+* **Layer level attributes** (Names tab, on by default): `s@layer` split into `LL0`, `LL1`, ... —
+  `SC::STSZ::truby` gives `LL0 = SC`, `LL1 = STSZ`, `LL2 = truby`; on primitives, point clouds and Info points;
+  prefix configurable; User Text keys with these names get `ut_`.
+* **Rebuild HDAs keeps parameter values** of nodes in the open scene: the loaded definition is updated in place
+  instead of being destroyed and created again (that reset every node to defaults); values are also checked and
+  restored after the rebuild.
 
 ## 0.3.0 — 2026-10-05
 Requirements from the 0.2.1 review: geometry modes, exact trimmed NURBS, preparation in Rhino, strict Xform input,

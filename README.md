@@ -15,6 +15,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 | Houdini | Rhino |
 |---|---|
 | primitive `s@layer` | layer, including the hierarchy (`Parent::Child`) |
+| primitive `s@LL0`, `s@LL1`, … | layer levels (`SC::STSZ::truby` → `SC`, `STSZ`, `truby`), import only |
 | primitive `s@name` | object name |
 | primitive `v@Cd` | object colour |
 | primitive groups | Rhino groups |

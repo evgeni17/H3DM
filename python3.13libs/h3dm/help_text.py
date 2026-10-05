@@ -61,11 +61,15 @@ Non-Latin Names:
 Layer Case:
     *Keep*, *Lower*, or *Project Rule*: sublayers lower case; at the top level a code stays as is (PA1, VO1-3K),
     "code_tail" becomes CODE_tail, everything else lower case; the AXIS branch is not changed.
+Create Layer Level Attributes:
+    On by default. One string attribute per level of `s@layer`: `SC::STSZ::truby` gives `LL0` = `SC`,
+    `LL1` = `STSZ`, `LL2` = `truby`; shallower layers get empty strings on deeper levels. Written on primitives,
+    point clouds and Info points; names follow transliteration and Layer Case. __Prefix__ changes `LL`.
 
 @attributes
 
 `s@layer` (full path with `::`), `s@name`, `v@Cd`, `f@Alpha`, `s@material`, `d@user_text`, `s@rhino_id`, `s@rhino_type`,
-`i@rhino_face`, `s@block`, `s@path` (`/layer/.../name`, compatible with HIFC). Rhino groups become primitive groups.
+`i@rhino_face`, `s@block`, `s@path` (`/layer/.../name`, compatible with HIFC), `s@LL0`, `s@LL1`, ... (layer levels). Rhino groups become primitive groups.
 
 Detail: `d@rhino_doc` (units, tolerances, authors, earth anchor), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
@@ -175,11 +179,15 @@ Non-Latin Names:
 Layer Case:
     *Keep*, *Lower* или *Project Rule*: подслои строчными; на верхнем уровне код остаётся как есть (PA1, VO1-3K),
     «код_хвост» -> КОД_хвост, остальное строчными; ветка AXIS не меняется.
+Create Layer Level Attributes:
+    Включено по умолчанию. По строковому атрибуту на каждый уровень `s@layer`: `SC::STSZ::truby` даёт
+    `LL0` = `SC`, `LL1` = `STSZ`, `LL2` = `truby`; у слоёв меньшей глубины более глубокие уровни — пустые строки.
+    Пишется на примитивы, точки облаков и точки Info; имена — после транслита и Layer Case. __Prefix__ меняет `LL`.
 
 @attributes
 
 `s@layer` (полный путь через `::`), `s@name`, `v@Cd`, `f@Alpha`, `s@material`, `d@user_text`, `s@rhino_id`, `s@rhino_type`,
-`i@rhino_face`, `s@block`, `s@path` (`/слой/.../имя`, совместим с HIFC). Группы Rhino становятся группами примитивов.
+`i@rhino_face`, `s@block`, `s@path` (`/слой/.../имя`, совместим с HIFC), `s@LL0`, `s@LL1`, ... (уровни слоя). Группы Rhino становятся группами примитивов.
 
 Detail: `d@rhino_doc` (единицы, допуски, авторы, гео-привязка), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,

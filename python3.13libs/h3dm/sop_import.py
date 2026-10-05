@@ -89,6 +89,8 @@ def read_options(owner):
     o.layercase = _ev(owner, "layercase", "keep")
     o.layersep = _ev(owner, "layersep", "::") or "::"
     o.pathattr = bool(_ev(owner, "pathattr", 1))
+    o.layerlevels = bool(_ev(owner, "layerlevels", 1))
+    o.layerlevelprefix = _level_prefix(_ev(owner, "layerlevelprefix", "LL"))
     o.colormode = _ev(owner, "colormode", "display")
     o.usertext = bool(_ev(owner, "usertext", 1))
     o.utflat = bool(_ev(owner, "utflat", 1))
@@ -105,6 +107,11 @@ def read_options(owner):
     o.trimtol = _ev(owner, "trimtol", 0.0)
     o.uttextkeys = _ev(owner, "uttextkeys", "")
     return o
+
+
+def _level_prefix(p):
+    from .names import safe_identifier
+    return safe_identifier(str(p or "").strip()) or "LL"
 
 
 # ---------------------------------------------------------------- файл и кэш
@@ -402,6 +409,10 @@ class Naming(object):
         self.opt = opt
         self.m = NameMapper(opt.nonlatin, opt.layercase)
         self.keep_orig = opt.nonlatin == "translit_keep"
+        # имена атрибутов уровней слоя (LL0, LL1, ...) заняты: такие ключи User Text получат префикс ut_
+        self.reserved = set(RESERVED_UT)
+        if getattr(opt, "layerlevels", False):
+            self.reserved |= {"%s%d" % (opt.layerlevelprefix, i) for i in range(64)}
         if f is not None:
             self._prepare(f)
 
@@ -416,7 +427,7 @@ class Naming(object):
         names += [m.Name or "" for m in f.Materials]
         self.m.prepare_names(names)
         self.m.prepare_groups([g.Name or ("Group%d" % g.Index) for g in f.Groups])
-        self.m.prepare_attribs(keys, RESERVED_UT)
+        self.m.prepare_attribs(keys, self.reserved)
 
     def layer(self, full_path):
         out = self.m.layer(full_path, "::")
@@ -431,7 +442,7 @@ class Naming(object):
         return self.m.group(g)
 
     def key(self, k):
-        return self.m.attrib(k, RESERVED_UT)
+        return self.m.attrib(k, self.reserved)
 
     def path(self, layer_full, name, fallback):
         segs = [s.replace("/", "_") for s in self.m.layer(layer_full, "::").split("::") if s]
@@ -985,6 +996,19 @@ def _take(col, idx):
     return [col[i] for i in idx.tolist()]
 
 
+def _write_layer_levels(geo, cls, layers, idx, opt):
+    """s@layer по уровням: <prefix>0, <prefix>1, ... (строки; у мелких слоёв глубже — пустые)."""
+    if not opt.layerlevels:
+        return
+    sep = opt.layersep or "::"
+    splits = [l.split(sep) if l else [] for l in layers]
+    depth = max((len(x) for x in splits), default=0)
+    idx = np.asarray(idx, dtype=np.int64)
+    for d in range(depth):
+        col = [x[d] if d < len(x) else "" for x in splits]
+        _set_strings(geo, cls, "%s%d" % (opt.layerlevelprefix, d), _take(col, idx))
+
+
 def _write_object_attribs(geo, cls, vals, idx, ctx, with_color=True):
     """Атрибуты объектов на элементы класса cls; idx — индекс объекта для каждого элемента."""
     opt, naming = ctx.opt, ctx.naming
@@ -994,6 +1018,7 @@ def _write_object_attribs(geo, cls, vals, idx, ctx, with_color=True):
         return _take(vals[key], idx)
 
     _set_strings(geo, cls, "layer", per("layer"))
+    _write_layer_levels(geo, cls, vals["layer"], idx, opt)
     _set_strings(geo, cls, "name", per("name"))
     if naming.keep_orig and naming.m.active:
         if any(a != b for a, b in zip(vals["layer"], vals["layer_orig"])):
@@ -1162,6 +1187,7 @@ def _cook_info(node, geo, f, opt, gx, naming):
     _set_strings(geo, T, "info_type", [r["type"] for r in recs])
     _set_strings(geo, T, "text", [r.get("text", "") for r in recs])
     _set_strings(geo, T, "layer", vals["layer"])
+    _write_layer_levels(geo, T, vals["layer"], idx, opt)
     _set_strings(geo, T, "name", vals["name"])
     if naming.keep_orig and naming.m.active and any(a != b for a, b in zip(vals["layer"], vals["layer_orig"])):
         _set_strings(geo, T, "layer_orig", vals["layer_orig"])
