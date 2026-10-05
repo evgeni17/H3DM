@@ -130,23 +130,149 @@ def _curve_prim(start, n, order, knots):
         "basis", ["type", "NURBS", "order", int(order), "endinterpolation", bool(clamped), "knots", knots]]]
 
 
-def _profiles(loops, su, sv):
-    """Петли кривых обрезки (UV в домене поверхности) -> вложенная геометрия profiles."""
-    P, prims, regions, n = [], [], [], 0
-    for loop in loops:
+def _profile_regions(loops, su, sv):
+    """Петли кривых обрезки (UV в домене поверхности) -> области в том виде, как они пишутся в profiles:
+    [[(порядок, узлы от 0, точки (n, 3) = (u - su, v - sv, 1), u0, u1), ...], ...] — одна область на петлю."""
+    regions = []
+    for loop in loops or ():
         faces = []
         for c in loop:
             uv = np.asarray(c["cv"], dtype=np.float64).reshape(-1, 2)
-            P.append(np.column_stack([uv[:, 0] - su, uv[:, 1] - sv, np.ones(len(uv))]))
+            P = np.column_stack([uv[:, 0] - su, uv[:, 1] - sv, np.ones(len(uv))])
             kn = np.asarray(c["knots"], dtype=np.float64)
             kn = kn - kn[0]
-            prims.append(_curve_prim(n, len(uv), c["order"], kn))
-            n += len(uv)
-            faces.append(["face", len(prims) - 1, "u0", float(kn[0]), "u1", float(kn[-1])])
+            faces.append((int(c["order"]), kn, P, float(kn[0]), float(kn[-1])))
         if faces:
-            regions.append(["opencasual", False, "faces", faces])
+            regions.append(faces)
+    return regions
+
+
+def _profiles(loops, su, sv):
+    """Петли кривых обрезки (UV в домене поверхности) -> вложенная геометрия profiles."""
+    P, prims, regions, n = [], [], [], 0
+    for region in _profile_regions(loops, su, sv):
+        faces = []
+        for order, kn, pts, u0, u1 in region:
+            P.append(pts)
+            prims.append(_curve_prim(n, len(pts), order, kn))
+            n += len(pts)
+            faces.append(["face", len(prims) - 1, "u0", u0, "u1", u1])
+        regions.append(["opencasual", False, "faces", faces])
     P = np.concatenate(P) if P else np.zeros((0, 3))
     return _points_doc(P, prims, ptype="hpoint", extra=["altitude", 0, "trimregions", regions])
+
+
+# ---------------------------------------------------------------- подпись обрезки (экспорт: менялась ли обрезка)
+
+def _signature(regions):
+    """Подпись областей обрезки. Числа — в float32: Houdini может хранить или печатать их с потерей
+    последнего бита double, а изменение обрезки в пределах float32 геометрически ничтожно."""
+    import hashlib
+    h = hashlib.sha1()
+    h.update(b"H3DM-trims-1")
+    for faces in regions:
+        h.update(b"R" + np.int32(len(faces)).tobytes())
+        for order, kn, P, u0, u1 in faces:
+            kn = np.asarray(kn, dtype=np.float64).reshape(-1)
+            P = np.asarray(P, dtype=np.float64).reshape(-1, 3)
+            h.update(np.int32([order, len(kn), len(P)]).tobytes())
+            h.update(kn.astype(np.float32).tobytes())
+            h.update(P.astype(np.float32).tobytes())
+            h.update(np.float32([u0, u1]).tobytes())
+    return h.hexdigest()[:20]
+
+
+def profiles_signature(loops, su, sv):
+    """Подпись обрезки, которую импорт записывает в profiles (loops = None — без обрезки)."""
+    return _signature(_profile_regions(loops, su, sv))
+
+
+def _kv(lst):
+    """Список JSON Houdini [ключ, значение, ключ, значение, ...] -> dict."""
+    if isinstance(lst, dict):
+        return lst
+    return {lst[i]: lst[i + 1] for i in range(0, len(lst) - 1, 2)}
+
+
+def _iter_prims(prims):
+    """Примитивы .geo -> (тип, поля). Houdini пишет одинаковые примитивы «прогоном» (run): заголовок
+    {type: run, runtype, varyingfields, uniformfields}, тело — список значений varyingfields на примитив."""
+    for pr in prims or ():
+        head = _kv(pr[0])
+        if head.get("type") == "run":
+            names = list(head.get("varyingfields", []))
+            uni = _kv(head.get("uniformfields", {}))
+            for vals in pr[1]:
+                f = dict(uni)
+                f.update(zip(names, vals))
+                yield head.get("runtype"), f
+        else:
+            yield head.get("type"), _kv(pr[1])
+
+
+def _attr_values(vals, size):
+    """Значения атрибута точек из .geo (tuples / arrays / rawpagedata) -> массив (n, size)."""
+    v = _kv(vals)
+    if "tuples" in v:
+        return np.asarray(v["tuples"], dtype=np.float64).reshape(-1, size)
+    if "arrays" in v:
+        return np.asarray(v["arrays"], dtype=np.float64).reshape(size, -1).T
+    if "rawpagedata" in v:
+        raw = np.asarray(v["rawpagedata"], dtype=np.float64).reshape(-1)
+        pagesize = int(v.get("pagesize", 1024))
+        packing = v.get("packing")
+        if size == 1 or not packing or list(packing) == [size]:
+            return raw.reshape(-1, size)
+        # упаковка по компонентам внутри страницы: [[x...][y...][z...]] на страницу
+        out, i = [], 0
+        while i < len(raw):
+            n = min(pagesize, (len(raw) - i) // size)
+            page = []
+            for w in packing:
+                page.append(raw[i:i + n * int(w)].reshape(n, int(w)))
+                i += n * int(w)
+            out.append(np.hstack(page))
+        return np.vstack(out) if out else np.zeros((0, size))
+    raise ValueError("unsupported attribute values")
+
+
+def profiles_signature_doc(doc):
+    """Вложенная геометрия profiles NURBMesh из .geo Houdini (None — без обрезки) -> подпись,
+    сравнимая с profiles_signature()."""
+    if not doc:
+        return _signature([])
+    d = _kv(doc)
+    P = np.zeros((0, 3))
+    for a in _kv(d.get("attributes", [])).get("pointattributes", []):
+        head, body = _kv(a[0]), _kv(a[1])
+        if head.get("name") == "P":
+            P = _attr_values(body["values"], int(body.get("size", 3)))
+    topo = _kv(d.get("topology", []))
+    ref = _kv(topo.get("pointref", []))
+    idx = np.asarray(ref.get("indices", []), dtype=np.int64)
+    curves = []
+    for _, body in _iter_prims(d.get("primitives", [])):
+        basis = _kv(body.get("basis", []))
+        vtx = np.asarray(body.get("vertex", []), dtype=np.int64).reshape(-1)
+        kn = np.asarray(basis.get("knots", []), dtype=np.float64)
+        curves.append((int(basis.get("order", 0)), kn, P[idx[vtx]] if len(vtx) else np.zeros((0, 3))))
+    regions = []
+    for reg in d.get("trimregions", []):
+        faces = []
+        for f in _kv(reg).get("faces", []):
+            fk = _kv(f)
+            order, kn, pts = curves[int(fk["face"])]
+            faces.append((order, kn, pts, float(fk.get("u0", kn[0] if len(kn) else 0.0)),
+                          float(fk.get("u1", kn[-1] if len(kn) else 0.0))))
+        if faces:
+            regions.append(faces)
+    return _signature(regions)
+
+
+def surface_profiles(geo_doc):
+    """.geo Houdini (JSON) -> [вложенная геометрия profiles или None] по NURBMesh в порядке примитивов."""
+    d = _kv(geo_doc)
+    return [body.get("profiles") for t, body in _iter_prims(d.get("primitives", [])) if t == "NURBMesh"]
 
 
 def nurbs_geo(items):

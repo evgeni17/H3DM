@@ -6,6 +6,7 @@
 """
 import collections
 import os
+import re
 
 import hou
 
@@ -1016,6 +1017,188 @@ def run_export_passthrough():
     return fails
 
 
+def _edit_geo(geo, edit):
+    """Правка геометрии через .geo (JSON): edit(номер примитива, тип, поля) -> True, если поля изменены.
+    Нужна для того, что HOM не меняет: узлы NURBS, кривые обрезки."""
+    import json
+    import tempfile
+    fd, fn = tempfile.mkstemp(suffix=".geo", prefix="h3dm_edit_")
+    os.close(fd)
+    geo.saveToFile(fn)
+    with open(fn, encoding="utf-8") as fh:
+        doc = json.load(fh)
+    prims = doc[doc.index("primitives") + 1]
+    k = 0
+    for pr in prims:
+        head = dict(zip(pr[0][::2], pr[0][1::2]))
+        if head.get("type") == "run":
+            names = list(head["varyingfields"])
+            for vals in pr[1]:
+                f = dict(zip(names, vals))
+                if edit(k, head["runtype"], f):
+                    vals[:] = [f[n] for n in names]
+                k += 1
+        elif str(head.get("type", "")).endswith("_run"):
+            k += int(dict(zip(pr[1][::2], pr[1][1::2])).get("nprimitives", 0))     # Polygon_run: много полигонов
+        else:
+            body = pr[1]
+            f = dict(zip(body[::2], body[1::2]))
+            if edit(k, head.get("type"), f):
+                pr[1] = [x for kv in f.items() for x in kv]
+            k += 1
+    with open(fn, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    out = hou.Geometry()
+    out.loadFromFile(fn)
+    os.remove(fn)
+    return out
+
+
+def run_export_changes():
+    """0.4.0-dev.4: правки NURBS (вес, узел, отверстие) и изменение исходника после импорта не дают копирования
+    из исходного файла; защита исходника — по физическому файлу (ссылка на папку, жёсткая ссылка, регистр)."""
+    import base64
+    import json
+    import shutil
+    import tempfile
+    import zlib
+    from h3dm import sop_export as se, rhino_read as rr, ensure_vendor_path
+    ensure_vendor_path()
+    import rhino3dm as r
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_ch_")
+    real = os.path.join(out_dir, "real")
+    os.makedirs(real)
+    srcf = os.path.join(real, "source.3dm")
+    shutil.copy(os.path.join(FX, "h3dm_fixture_prepared_v001.3dm"), srcf)
+    S = rr.read(srcf)
+    ids = {o.Attributes.Name: str(o.Attributes.Id) for o in S.Objects if not o.Attributes.IsInstanceDefinitionObject}
+    dome, holed = ids["Купол"], ids["Панель с отверстием"]
+    n_brep = sum(1 for o in S.Objects if not o.Attributes.IsInstanceDefinitionObject
+                 and rr.enum_name(o.Geometry.ObjectType) in ("Brep", "Extrusion"))
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_ch")
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(srcf)
+        imp.parm("geomode").set("all_nurbs")
+        st = tmp.createNode("stash", "edited")
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, st)
+        ex.setInput(1, imp, 2)
+        ex.parm("packed").set("explode")
+        base = imp.geometry().freeze()
+
+        def export(geo, name):
+            st.parm("stash").set(geo)
+            ex.parm("file").set(os.path.join(out_dir, name))
+            text, path = se.run(ex, write=True)
+            B = {str(o.Attributes.Id): o for o in rr.read(path).Objects}
+            m = re.search(r"exact Breps\): (\d+)", text)
+            return (int(m.group(1)) if m else 0), B
+
+        def prims_of(geo, rid):
+            return [p for p in geo.prims() if p.attribValue("rhino_id") == rid and p.type() == hou.primType.NURBSSurface]
+
+        n0, B = export(base, "base.3dm")
+        if n0 != n_brep:
+            fails.append("changes: control export copied %d of %d" % (n0, n_brep))
+        # 1) вес одной управляющей точки купола (копия: freeze() у замороженной геометрии возвращает её саму)
+        g = hou.Geometry(base)
+        pr = prims_of(g, dome)[0]
+        pt = pr.vertex(1, 1).point() if pr.intrinsicValue("nu") > 1 and pr.intrinsicValue("nv") > 1 else pr.vertices()[0].point()
+        pt.setAttribValue("Pw", 0.25)
+        n, B = export(g, "weight.3dm")
+        dg = B[dome].Geometry if dome in B else None
+        w025 = False
+        if dg is not None and rr.enum_name(dg.ObjectType) == "Brep":
+            for i in range(len(dg.Faces)):
+                ns = dg.Faces[i].UnderlyingSurface().ToNurbsSurface()
+                w025 |= any(abs(ns.Points.GetControlPoint(a, b).W - 0.25) < 1e-9
+                            for a in range(ns.Points.CountU) for b in range(ns.Points.CountV))
+        if n != n_brep - 1 or dg is None:
+            fails.append("changes: weight edit copied from the source (%d copied)" % n)
+        elif rr.enum_name(dg.ObjectType) == "Brep" and not w025:
+            fails.append("changes: weight edit lost (no weight 0.25 in the exported surface)")
+        # 2) узел: правка через .geo
+        tgt = {p.number() for p in prims_of(base, dome)}
+        done = []
+
+        def knot(k, t, f):
+            if k in tgt and t == "NURBMesh" and "ubasis" in f and not done:
+                b = dict(zip(f["ubasis"][::2], f["ubasis"][1::2]))
+                kn = list(b["knots"])
+                o = int(b["order"])
+                inner = [i for i in range(o, len(kn) - o) if kn[i + 1] > kn[i]]
+                if inner:
+                    i = inner[0]
+                    kn[i] = kn[i] + 0.25 * (kn[i + 1] - kn[i])
+                else:
+                    kn = [2.0 * x for x in kn]
+                b["knots"] = kn
+                f["ubasis"] = [x for kv in b.items() for x in kv]
+                done.append(k)
+                return True
+            return False
+        g = _edit_geo(base, knot)
+        n, B = export(g, "knot.3dm")
+        if not done or n != n_brep - 1:
+            fails.append("changes: knot edit copied from the source (%d, edited %s)" % (n, done))
+        # 3) удалить отверстие панели: область обрезки из profiles
+        tgt = {p.number() for p in prims_of(base, holed)}
+        done = []
+
+        def unhole(k, t, f):
+            if k in tgt and t == "NURBMesh" and f.get("profiles"):
+                prof = f["profiles"]
+                i = prof.index("trimregions")
+                if len(prof[i + 1]) > 1:
+                    prof[i + 1] = prof[i + 1][:1]
+                    done.append(k)
+                    return True
+            return False
+        g = _edit_geo(base, unhole)
+        n, B = export(g, "unhole.3dm")
+        hb = B.get(holed)
+        loops = sum(len(hb.Geometry.Faces[i].Loops) for i in range(len(hb.Geometry.Faces))) \
+            if hb is not None and rr.enum_name(hb.Geometry.ObjectType) == "Brep" else 0
+        if not done or n != n_brep - 1 or loops > 1:
+            fails.append("changes: removed hole came back (%d copied, %d loops, edited %s)" % (n, loops, done))
+        # 4) исходник изменён после импорта (обрезка панели в h3dm.trims): панель не копируется
+        f3 = r.File3dm.Read(srcf)
+        for o in f3.Objects:
+            if str(o.Attributes.Id) == holed:
+                gg = o.Geometry
+                d = json.loads(zlib.decompress(base64.b64decode(gg.GetUserString("h3dm.trims"))).decode("utf-8"))
+                d["faces"][0]["a"] = float(d["faces"][0].get("a") or 0.0) + 1.0
+                gg.SetUserString("h3dm.trims", base64.b64encode(zlib.compress(json.dumps(d).encode("utf-8"))).decode("ascii"))
+        f3.Write(srcf, 8)
+        n, B = export(base, "srcchanged.3dm")
+        if n != n_brep - 1:
+            fails.append("changes: source changed after import, still copied %d" % n)
+        # 5) защита исходника: ссылка на папку, жёсткая ссылка, другой регистр
+        os.symlink(real, os.path.join(out_dir, "alias"))
+        os.link(srcf, os.path.join(real, "hard.3dm"))
+        ex.parm("overwrite").set(1)
+        ex.parm("allowsource").set(0)
+        st.parm("stash").set(base)
+        for alt in (os.path.join(out_dir, "alias", "source.3dm"), os.path.join(real, "hard.3dm"),
+                    os.path.join(real, "SOURCE.3dm") if os.path.exists(os.path.join(real, "SOURCE.3dm")) else None):
+            if alt is None:
+                continue
+            ex.parm("file").set(alt)
+            try:
+                se.run(ex, write=True)
+                fails.append("changes: source overwritten through %s" % alt)
+            except se.ExportError:
+                pass
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export changes: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
-          + run_export_passthrough())
+          + run_export_passthrough() + run_export_changes())

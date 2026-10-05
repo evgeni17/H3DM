@@ -665,6 +665,15 @@ def brep_trims(brep):
     return {f["f"]: f for f in d.get("faces", [])}
 
 
+def face_trims_hash(fdata):
+    """Отпечаток данных обрезки грани из подготовки (None — нет данных)."""
+    if fdata is None:
+        return "-"
+    import hashlib
+    import json
+    return hashlib.sha1(json.dumps(fdata, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()[:20]
+
+
 def surface_evaluator(d):
     """Данные поверхности (nurbs_surface_data, без разворота) -> S(u, v) в координатах модели."""
     from .nurbs import eval_surface
@@ -875,6 +884,12 @@ def _brep_parts(brep, opt, stats, solid=None):
                 parts.append(d)
         else:
             stats["faces_without_mesh"] = stats.get("faces_without_mesh", 0) + 1
+    if as_nurbs:
+        # отпечаток исходной обрезки граней: экспорт проверяет, что исходный файл с импорта не менялся
+        src_tr = trims if trims is not None else brep_trims(brep)
+        for p in parts:
+            if p.get("t") == "nsurf" and p.get("face", -1) >= 0:
+                p["src_trim_hash"] = face_trims_hash(src_tr.get(p["face"]) if src_tr else None)
     return parts
 
 

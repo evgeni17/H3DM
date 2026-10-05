@@ -125,5 +125,27 @@ crv = d["primitives"][1][1]
 cb = crv[crv.index("basis") + 1]
 check(cb[cb.index("knots") + 1][1] == [0.0, 0.0, 0.0, 1.0, 1.0, 1.0], "curve knots start at 0")
 
+# 4) подпись обрезки (экспорт: менялась ли обрезка): из петель импорта и из .geo — одинаковая
+import json as _json
+loops = [[{"order": 2, "knots": [-1, -1, 0, 1, 1], "cv": [(-1, 2), (1, 2), (1, 3), (-1, 2)]}],
+         [{"order": 2, "knots": [0, 0, 1, 2, 2], "cv": [(0, 2.2), (0.5, 2.5), (0, 2.8), (0, 2.2)]}]]
+sig = H.profiles_signature(loops, -1.0, 2.0)
+geo = _json.loads(_json.dumps(H._profiles(loops, -1.0, 2.0), default=lambda o: o.tolist()))
+check(H.profiles_signature_doc(geo) == sig, "trim signature: import == .geo (rawpagedata)")
+gd = dict(zip(geo[0::2], geo[1::2]))
+P = np.array(gd["attributes"][1][0][1][gd["attributes"][1][0][1].index("values") + 1][7]).reshape(-1, 3)
+v = gd["attributes"][1][0][1][gd["attributes"][1][0][1].index("values") + 1]
+v[v.index("rawpagedata")] = "tuples"
+v[v.index("tuples") + 1] = P.tolist()
+check(H.profiles_signature_doc(geo) == sig, "trim signature: tuples form")
+check(H.profiles_signature(loops[:1], -1.0, 2.0) != sig, "trim signature: removed hole differs")
+moved = [loops[0], [dict(loops[1][0], cv=[(0, 2.3), (0.5, 2.5), (0, 2.8), (0, 2.3)])]]
+check(H.profiles_signature(moved, -1.0, 2.0) != sig, "trim signature: moved hole differs")
+check(H.profiles_signature(None, 0, 0) == H.profiles_signature_doc(None), "trim signature: no trims")
+run = [["type", "run", "runtype", "NURBMesh", "varyingfields", ["vertex", "profiles"], "uniformfields", {"surface": "quads"}],
+       [[[[0, 1]], None], [[[2, 3]], geo]]]
+pr = H.surface_profiles(["primitives", [run]])
+check(len(pr) == 2 and pr[0] is None and H.profiles_signature_doc(pr[1]) == sig, "run-encoded NURBMesh profiles")
+
 print("test_houjson: %s" % ("OK" if not FAIL else "FAILED\n  " + "\n  ".join(FAIL)))
 raise SystemExit(1 if FAIL else 0)

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0-dev.4 — 2026-10-05
+Fixes from the 0.4.0-dev.3 review (both reproduced; not a release yet).
+* **Edits of NURBS faces were lost:** the unchanged-object check compared only control point positions, so a
+  changed weight (36.95 mm shape difference in the review) or a removed hole was replaced by the source Brep.
+  Now NURBS faces are compared completely: positions, weights (`Pw`), knots, orders, wrap and trims. Trims are
+  checked with the new prim attribute `rhino_trim_sig` written at import: the signature of the trim curves the
+  import wrote into Houdini (compared with the primitive's current trim curves, read from .geo because HOM has no
+  trim access) and the hash of the source file's trim data (compared with the source file now — it may have been
+  edited after the import). Objects imported by older versions have no signature and are not copied (warning).
+* **Source file protection** compares the physical file (realpath + samefile): a link to the source folder or
+  file, a hard link and a different letter case no longer bypass *Allow Overwriting the Source File*.
+* Tests (`run_export_changes`): a changed weight, a changed knot, a removed hole and source trims edited after
+  the import are exported from Houdini (the rest is still copied); writing through a folder link, a hard link or
+  `SOURCE.3dm` is refused.
+
 ## 0.4.0-dev.3 — 2026-10-05
 Export, step 3: unchanged Breps go back exactly.
 * **Unchanged objects from the source file** (new toggle, on by default): a Brep or extrusion imported with H3DM

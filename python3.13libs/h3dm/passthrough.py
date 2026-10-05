@@ -6,10 +6,13 @@
 из файла импорта: обрезанные грани с отверстиями, объединённые тела, швы — всё точно. Атрибуты (слой, имя,
 материал, User Text) берутся из Houdini — их правки сохраняются.
 
-«Не менялась» проверяется по самой геометрии, без отпечатков при импорте: каждая грань Brep сопоставляется
-с примитивами Houdini с тем же rhino_face — NURBS-поверхность по управляющим точкам, сетка — по вершинам
-каждой грани сетки отображения в том же порядке (импорт сохраняет порядок). Допуск — точность float32
-позиций Houdini, пересчитанная в единицы файла.
+«Не менялась» проверяется по самой геометрии: каждая грань Brep сопоставляется с примитивами Houdini с тем же
+rhino_face. NURBS-поверхность — полностью: управляющие точки, веса, узлы, порядки, замкнутость, направление
+и обрезка. Обрезка сверяется подписью: rhino_trim_sig = «подпись кривых обрезки, записанных импортом в
+Houdini» : «отпечаток данных обрезки исходного файла». Первая часть сравнивается с текущими кривыми обрезки
+примитива (читаются из .geo), вторая — с исходным файлом сейчас (файл могли изменить после импорта).
+Сетка — по вершинам каждой грани сетки отображения в том же порядке (импорт сохраняет порядок).
+Допуск позиций — точность float32 позиций Houdini, пересчитанная в единицы файла.
 """
 import numpy as np
 
@@ -48,17 +51,56 @@ def _mesh_faces_pos(m, scale):
     return out
 
 
-def surface_matches(prim_cv, src_surface, scale, tol):
-    """CV примитива (nv, nu, 3, уже в координатах файла, U развёрнут как при экспорте) против поверхности
-    исходной грани (с зажатием как при импорте); U может быть развёрнут (грани OrientationIsReversed)."""
-    from .rhino_read import nurbs_surface_data
-    d = nurbs_surface_data(src_surface, reverse=False)
+W_TOL = 1e-6          # веса (Pw может храниться во float32)
+K_TOL = 1e-6          # узлы — доля длины узлового вектора
+
+
+def _knots_equal(a, b):
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    if a.shape != b.shape:
+        return False
+    if not len(a):
+        return True
+    a, b = a - a[0], b - b[0]
+    return float(np.abs(a - b).max()) <= K_TOL * max(1.0, abs(float(a[-1])))
+
+
+def surface_matches(h, face, scale, tol):
+    """Примитив Houdini h = {'cv' (nv, nu, 3) в координатах файла, порядок вершин Houdini; 'w' (nv, nu);
+    'ku', 'kv'; 'ou', 'ov'; 'wrap'} против исходной грани — так, как её записал импорт (зажатие, разворот U)."""
+    from .rhino_read import nurbs_surface_data, houdini_reverse
+    d = nurbs_surface_data(face.UnderlyingSurface(), reverse=houdini_reverse(face.OrientationIsReversed))
     if d is None:
         return False
     S = np.asarray(d["cv"], dtype=np.float64) * scale
-    if S.shape != prim_cv.shape:
+    if S.shape != h["cv"].shape or any(h["wrap"]):
         return False
-    return min(float(np.abs(S - prim_cv).max()), float(np.abs(S[:, ::-1] - prim_cv).max())) <= tol
+    if int(d["order_u"]) != h["ou"] or int(d["order_v"]) != h["ov"]:
+        return False
+    if not _knots_equal(d["knots_u"], h["ku"]) or not _knots_equal(d["knots_v"], h["kv"]):
+        return False
+    if float(np.abs(np.asarray(d["w"], dtype=np.float64) - h["w"]).max()) > W_TOL:
+        return False
+    return float(np.abs(S - h["cv"]).max()) <= tol
+
+
+def trims_match(src_geom, sigs):
+    """Обрезка: sigs = {номер грани: (подпись из атрибута rhino_trim_sig, подпись кривых обрезки примитива
+    сейчас)}. Совпадать должны обе части: кривые в Houdini не трогали и обрезка исходника та же, что при импорте."""
+    from .rhino_read import brep_trims, face_trims_hash
+    brep = _faces_of(src_geom)
+    if brep is None:
+        return False
+    tr = brep_trims(brep)
+    for fi, (attr, now) in sigs.items():
+        if not attr or ":" not in attr:
+            return False                                   # импорт старой версии — проверить нельзя
+        h_sig, src_sig = attr.split(":", 1)
+        if h_sig != now:
+            return False
+        if src_sig != face_trims_hash(tr.get(fi) if tr else None):
+            return False
+    return True
 
 
 def mesh_matches(prim_faces_pos, src_face_mesh, scale, tol):
@@ -75,7 +117,8 @@ def mesh_matches(prim_faces_pos, src_face_mesh, scale, tol):
 
 
 def object_unchanged(src_geom, faces, scale, tol):
-    """faces: {номер грани: ('nurbs', cv) | ('mesh', [позиции вершин граней]) | ('other', None)}."""
+    """faces: {номер грани: ('nurbs', данные примитива для surface_matches) | ('mesh', [позиции вершин
+    граней]) | ('other', None)}. Обрезку NURBS-граней проверяет trims_match."""
     brep = _faces_of(src_geom)
     if brep is None:
         return False
@@ -92,7 +135,7 @@ def object_unchanged(src_geom, faces, scale, tol):
         kind, data = faces[fi]
         face = brep.Faces[fi]
         if kind == "nurbs":
-            if not surface_matches(data, face.UnderlyingSurface(), scale, tol):
+            if not surface_matches(data, face, scale, tol):
                 return False
         elif kind == "mesh":
             if not mesh_matches(data, face.GetMesh(_r().MeshType.Any), scale, tol):

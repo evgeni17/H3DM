@@ -271,6 +271,7 @@ def _mark_passthrough(geo, pt):
     rid = list(geo.primStringAttribValues("rhino_id"))
     inst = list(geo.primStringAttribValues("rhino_instance_id")) if geo.findPrimAttrib("rhino_instance_id") else [""] * n
     rf = list(geo.primIntAttribValues("rhino_face"))
+    sig_attr = list(geo.primStringAttribValues("rhino_trim_sig")) if geo.findPrimAttrib("rhino_trim_sig") else None
     tcg = geo.findPrimGroup(TRIM_CURVES)
     helper = {p.number() for p in tcg.prims()} if tcg is not None else set()   # кривые границ — не грани
     by_obj = {}
@@ -281,8 +282,11 @@ def _mark_passthrough(geo, pt):
         return 0
     prims = geo.prims()
     P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
+    W = (np.array(geo.pointFloatAttribValues("Pw"), dtype=np.float64)
+         if geo.findPointAttrib("Pw") is not None else np.ones(len(P)))
     to, scale = pt["to"], pt["scale"]
-    sel = []
+    # 1) геометрия граней (позиции, веса, узлы, порядки) — без обрезки
+    cand = []                  # (rid, исходная геометрия, {грань: номер NURBS-примитива}, примитивы объекта)
     for r_id, faces in by_obj.items():
         try:
             o = src.Objects.FindId(uuid.UUID(r_id))
@@ -293,16 +297,20 @@ def _mark_passthrough(geo, pt):
         g = o.Geometry
         if enum_name(g.ObjectType) not in ("Brep", "Extrusion"):
             continue
-        data, maxabs, ok = {}, 0.0, True
+        data, maxabs, ok, nprims = {}, 0.0, True, {}
         for fi, idx in faces.items():
             ps = [prims[i] for i in idx]
             if len(ps) == 1 and ps[0].type() == hou.primType.NURBSSurface:
                 pr = ps[0]
                 nu, nv = int(pr.intrinsicValue("nu")), int(pr.intrinsicValue("nv"))
-                vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)])
-                Ph = P[vi.reshape(-1)]
+                vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)]).reshape(-1)
+                Ph = P[vi]
                 maxabs = max(maxabs, float(np.abs(Ph).max()))
-                data[fi] = ("nurbs", to(Ph).reshape(nv, nu, 3)[:, ::-1])
+                data[fi] = ("nurbs", {"cv": to(Ph).reshape(nv, nu, 3), "w": W[vi].reshape(nv, nu),
+                                      "ku": list(pr.intrinsicValue("uknots")), "kv": list(pr.intrinsicValue("vknots")),
+                                      "ou": int(pr.intrinsicValue("uorder")), "ov": int(pr.intrinsicValue("vorder")),
+                                      "wrap": (bool(pr.intrinsicValue("uwrap")), bool(pr.intrinsicValue("vwrap")))})
+                nprims[fi] = pr.number()
             elif all(p.type() == hou.primType.Polygon and p.isClosed() for p in ps):
                 pos = []
                 for p in ps:
@@ -316,15 +324,62 @@ def _mark_passthrough(geo, pt):
                 break
         if not ok:
             continue
+        if nprims and sig_attr is None:
+            pt["no_sig"] = pt.get("no_sig", 0) + 1         # импорт старой версии: обрезку проверить нельзя
+            continue
         tol = max(pt["abs_tol"], pt["eps"](maxabs))
         if pth.object_unchanged(g, data, scale, tol):
-            pt["map"][r_id] = g
-            for idx in faces.values():
-                sel.extend(prims[i] for i in idx)
+            cand.append((r_id, g, nprims, [i for idx in faces.values() for i in idx]))
+    # 2) обрезка NURBS-граней: текущие кривые обрезки примитивов против подписи импорта и исходника
+    sel = []
+    now = _trim_signatures(geo, sorted({pn for _, _, nprims, _ in cand for pn in nprims.values()}))
+    for r_id, g, nprims, members in cand:
+        sigs = {fi: (sig_attr[pn], now.get(pn)) for fi, pn in nprims.items()}
+        if sigs and not pth.trims_match(g, sigs):
+            continue
+        pt["map"][r_id] = g
+        sel.extend(prims[i] for i in members)
     if sel:
         grp = geo.findPrimGroup("__h3dm_pass") or geo.createPrimGroup("__h3dm_pass")
         grp.add(sel)
     return len(pt["map"])
+
+
+def _trim_signatures(geo, numbers):
+    """Подписи текущих кривых обрезки NURBS-поверхностей (номера примитивов) -> {номер: подпись}.
+    HOM не даёт кривые обрезки, поэтому выбранные примитивы сохраняются во временный .geo (JSON) и читаются."""
+    import json
+    import tempfile
+    from .houjson import profiles_signature_doc, surface_profiles
+    if not numbers:
+        return {}
+    grp = geo.findPrimGroup("__h3dm_sig") or geo.createPrimGroup("__h3dm_sig")
+    grp.clear()
+    grp.add([geo.prim(i) for i in numbers])
+    out = hou.Geometry()
+    _verb("blast", {"group": "__h3dm_sig", "grouptype": 4, "negate": 1}).execute(out, [geo])
+    grp.destroy()
+    # только то, что нужно для подписи: атрибуты (строки, JSON петель) не пишем
+    for a in list(out.primAttribs()) + list(out.pointAttribs()) + list(out.vertexAttribs()) + list(out.globalAttribs()):
+        if a.name() not in ("P", "Pw"):
+            a.destroy()
+    for g in list(out.primGroups()) + list(out.pointGroups()):
+        g.destroy()
+    fd, tmp = tempfile.mkstemp(suffix=".geo", prefix="h3dm_trims_")
+    os.close(fd)
+    try:
+        out.saveToFile(tmp)
+        with open(tmp, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    finally:
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
+    profs = surface_profiles(doc)
+    if len(profs) != len(numbers):
+        return {}
+    return {pn: profiles_signature_doc(pr) for pn, pr in zip(numbers, profs)}
 
 
 def _mark_free_points(geo):
@@ -510,12 +565,12 @@ def collect(node):
     if src.findGlobalAttrib("rhino_file") is not None:
         f = src.attribValue("rhino_file")
         if f:
-            plan.source_files.add(os.path.abspath(f))
+            plan.source_files.add(os.path.realpath(f))
     if src.findGlobalAttrib("h3dm_prepare") is not None:
         st = _plain(src.dictAttribValue("h3dm_prepare") or {})
         sp = (st.get("source") or {}).get("path")
         if sp:
-            plan.source_files.add(os.path.abspath(sp))
+            plan.source_files.add(os.path.realpath(sp))
 
     maps, imp_sep = _name_maps(src)
     restore = bool(_p(node, "restorenames", 1))
@@ -593,6 +648,10 @@ def collect(node):
         pt = {"src": source3dm, "to": to_file, "scale": factor, "abs_tol": plan.abs_tol, "map": {},
               "eps": lambda m: 8 * 1.2e-7 * m / s_ * factor} if source3dm is not None else None
         geo = prepare_geometry(geo_in, node, warn, keep_blocks, pt)
+        if pt and pt.get("no_sig"):
+            warn.append("%d unchanged NURBS objects were imported by an older H3DM (no rhino_trim_sig): their trims "
+                        "cannot be verified, so they are exported from Houdini geometry. Re-import to copy them "
+                        "exactly from the source file." % pt["no_sig"])
         pgrp = geo.findPrimGroup("__h3dm_pass")
         passed = {p.number() for p in pgrp.prims()} if pgrp is not None else set()
         pass_done = set()
@@ -894,6 +953,23 @@ def obj_name_pt(pt, pt_attr, maps, restore):
 
 # ---------------------------------------------------------------- запись
 
+def _is_source(path, sources):
+    """Тот же физический файл, что исходник импорта (или его подготовленная копия): ссылки на файл или папку,
+    жёсткие ссылки, другой регистр букв на нечувствительной к регистру ФС."""
+    rp = os.path.normcase(os.path.realpath(path))
+    exists = os.path.exists(path)
+    for s in sources:
+        if os.path.normcase(os.path.realpath(s)) == rp:
+            return True
+        if exists and os.path.exists(s):
+            try:
+                if os.path.samefile(path, s):
+                    return True
+            except OSError:
+                pass
+    return False
+
+
 def target_path(node, plan):
     path = hou.text.expandString(node.parm("file").evalAsString())
     if not path:
@@ -901,7 +977,7 @@ def target_path(node, plan):
     if not path.lower().endswith(".3dm"):
         path += ".3dm"
     path = os.path.abspath(path)
-    if path in plan.source_files and not _p(node, "allowsource", 0):
+    if _is_source(path, plan.source_files) and not _p(node, "allowsource", 0):
         raise ExportError("Output 3dm is the file the geometry was imported from (or its prepared copy):\n%s\n\n"
                           "Choose another file, or turn on Allow Overwriting the Source File." % path)
     if os.path.exists(path) and not _p(node, "overwrite", 0):

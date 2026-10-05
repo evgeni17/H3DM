@@ -38,7 +38,7 @@ TYPE_GROUPS = {"Poly": "h3dm_type_polygon", "NURBCurve": "h3dm_type_nurbs_curve"
 TYPE_OTHER = "h3dm_type_other"
 RESERVED = {"P", "Pw", "N", "Cd", "Alpha", "uv", "v", "id", "name", "layer", "path", "material", "user_text",
             "rhino_id", "rhino_type", "rhino_face", "block", "rhino_instance_id", "rhino_object_id",
-            "rhino_part_path", "rhino_block_path", "rhino_xform", "rhino_trim_loops", "layer_orig", "name_orig", "transform", "orient",
+            "rhino_part_path", "rhino_block_path", "rhino_xform", "rhino_trim_loops", "rhino_trim_sig", "layer_orig", "name_orig", "transform", "orient",
             "pscale", "scale", "up", "text", "type"}
 # id — частый ключ User Text; он не конфликтует с геометрией Houdini, но имя «id» у точек занято системой частиц
 RESERVED_UT = RESERVED - {"id"}
@@ -501,6 +501,7 @@ class Builder(object):
                 cv = p["cv"]
                 item = {"kind": "surface", "cv": to_h(cv.reshape(-1, 3)).reshape(cv.shape), "w": p["w"],
                         "trims": p.get("trims"), "trim_loops": p.get("trim_loops"),
+                        "src_trim_hash": p.get("src_trim_hash"),
                         "order_u": p["order_u"], "order_v": p["order_v"], "knots_u": p["knots_u"], "knots_v": p["knots_v"]}
                 trimmed = (2 if p.get("trims") else 1) if p.get("trimmed") else 0
                 self.nurbs.append((item, obj, p.get("face", -1), False, trimmed, bool(p.get("to_polys"))))
@@ -513,6 +514,7 @@ class Builder(object):
         prim_obj, prim_face, groups = [], [], {GROUP_TRIM: [], GROUP_TRIMMED: [], GROUP_TRIMMED_EXACT: [], GROUP_SUBD: []}
         self.point_colors = []    # (первая точка, цвета (N,3)) — цвета вершин сеток
         self.trim_loop_prims = []  # (примитив, JSON точных петель обрезки)
+        self.trim_sig_prims = []   # (примитив, подпись обрезки в Houdini : отпечаток обрезки исходника)
         tg = {}                   # группа типа -> индексы примитивов (известны по порядку записи)
 
         def typed(name, start, count):
@@ -583,6 +585,10 @@ class Builder(object):
                         groups[GROUP_TRIMMED_EXACT].append(n0 + k)
                         if not convert and item.get("trim_loops"):
                             self.trim_loop_prims.append((n0 + k, item["trim_loops"]))
+                    if not convert and item["kind"] == "surface" and item.get("src_trim_hash"):
+                        from .houjson import profiles_signature
+                        sig = profiles_signature(item.get("trims"), float(item["knots_u"][0]), float(item["knots_v"][0]))
+                        self.trim_sig_prims.append((n0 + k, sig + ":" + item["src_trim_hash"]))
         # 4) облака точек — отдельные точки без примитивов
         for v, c, obj in self.cloud:
             base = geo.intrinsicValue("pointcount")
@@ -856,6 +862,11 @@ def _emit(geo, b, objs, ctx):
         for i, js in b.trim_loop_prims:
             vals[i] = js
         _set_strings(geo, hou.attribType.Prim, "rhino_trim_loops", vals)
+    if getattr(b, "trim_sig_prims", None):
+        vals = [""] * geo.intrinsicValue("primitivecount")
+        for i, sig in b.trim_sig_prims:
+            vals[i] = sig
+        _set_strings(geo, hou.attribType.Prim, "rhino_trim_sig", vals)
     _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, ctx)
     _write_cloud_attribs(geo, b, objs, ctx)
     _write_point_colors(geo, b, objs, ctx)
