@@ -10,7 +10,9 @@
 
 Глобальный трансформ считается в float64 (h3dm.xform) ДО записи позиций во float32.
 """
+import itertools
 import os
+import time
 import re
 import tempfile
 
@@ -25,9 +27,14 @@ _CACHE = {}          # (путь, mtime, размер) -> File3dm
 _CACHE_MAX = 2
 
 GROUP_TRIM = "rhino_trim_curves"
-GROUP_TRIMMED = "rhino_trimmed_surfaces"
+GROUP_TRIMMED = "rhino_trimmed_surfaces"      # обрезанная грань, пришедшая БЕЗ обрезки (+ кривые границ)
+GROUP_TRIMMED_EXACT = "rhino_trimmed_exact"   # точная обрезанная NURBS (кривые обрезки из подготовки в Rhino)
 GROUP_SUBD = "rhino_subd"
 GROUP_INSTANCES = "rhino_instances"
+# группы по фактическому типу примитива на выходе (после всех преобразований); префикс зарезервирован
+TYPE_GROUPS = {"Poly": "h3dm_type_polygon", "NURBCurve": "h3dm_type_nurbs_curve",
+               "NURBMesh": "h3dm_type_nurbs_surface", "PackedGeometry": "h3dm_type_packed_geometry"}
+TYPE_OTHER = "h3dm_type_other"
 RESERVED = {"P", "Pw", "N", "Cd", "Alpha", "uv", "v", "id", "name", "layer", "path", "material", "user_text",
             "rhino_id", "rhino_type", "rhino_face", "block", "layer_orig", "name_orig", "transform", "orient",
             "pscale", "scale", "up", "text", "type"}
@@ -62,8 +69,10 @@ def _evt(owner, name, default=(0.0, 0.0, 0.0)):
 def read_options(owner):
     from .rhino_read import Options
     o = Options()
+    o.geomode = _ev(owner, "geomode", "legacy")
     o.surfout = _ev(owner, "surfout", "nurbs")
     o.trimnurbs = bool(_ev(owner, "trimnurbs", 0))
+    o.pack = bool(_ev(owner, "pack", 0))
     o.rendermesh = bool(_ev(owner, "rendermesh", 1))
     o.curves = _ev(owner, "curves", "nurbs")
     o.blocks = _ev(owner, "blocks", "packed")
@@ -93,6 +102,7 @@ def read_options(owner):
     o.farthreshold = _ev(owner, "farthreshold", 1000.0)
     o.manualorigin = _evt(owner, "manualorigin")
     o.curvetol = _ev(owner, "curvetol", 0.0)
+    o.trimtol = _ev(owner, "trimtol", 0.0)
     o.uttextkeys = _ev(owner, "uttextkeys", "")
     return o
 
@@ -113,6 +123,7 @@ def open_file(path):
 
 
 def clear_cache(kwargs=None):
+    """Reload: перечитать файл; дисковый кэш для следующей готовки ноды пропускается и перезаписывается."""
     _CACHE.clear()
     _BBOX.clear()
     if kwargs and kwargs.get("node") is not None:
@@ -120,7 +131,26 @@ def clear_cache(kwargs=None):
         for child in ("GEO", "INFO", "XFORM"):
             c = n.node(child)
             if c is not None:
+                _BYPASS.add(c.path())
                 c.cook(force=True)
+
+
+_BYPASS = set()
+
+
+def clear_disk_cache(kwargs=None):
+    """Кнопка Clear Disk Cache: удалить все записи кэша в папке ноды."""
+    from . import geocache
+    owner = kwargs["node"] if kwargs else None
+    cdir = hou.text.expandString(_ev(owner, "cachedir", "") or "") if owner is not None else ""
+    d, n, size = geocache.stats(cdir)
+    removed = geocache.clear(cdir)
+    msg = "H3DM disk cache cleared: %d entries, %.1f MB\n%s" % (n, size / 1048576.0, d)
+    if hou.isUIAvailable():
+        hou.ui.setStatusMessage(msg.replace("\n", "  "))
+    else:
+        print(msg)
+    return removed
 
 
 _BBOX = {}
@@ -138,38 +168,51 @@ def _file_bbox(path, f):
 # ---------------------------------------------------------------- глобальный трансформ
 
 def xform_from_geometry(geo):
-    """GlobalXform из геометрии (detail или первая точка: d@h3dm_xform)."""
+    """GlobalXform из геометрии (detail или первая точка: d@h3dm_xform); None, если его нет или он неверный."""
     from .xform import GlobalXform
     if geo is None:
         return None
-    a = geo.findGlobalAttrib("h3dm_xform")
-    if a is not None:
-        return GlobalXform.from_dict(geo.dictAttribValue("h3dm_xform"))
-    a = geo.findPointAttrib("h3dm_xform")
-    if a is not None and geo.intrinsicValue("pointcount") > 0:
-        return GlobalXform.from_dict(geo.iterPoints()[0].dictAttribValue("h3dm_xform"))
-    return None
+    d = None
+    if geo.findGlobalAttrib("h3dm_xform") is not None:
+        d = geo.dictAttribValue("h3dm_xform")
+    elif geo.findPointAttrib("h3dm_xform") is not None and geo.intrinsicValue("pointcount") > 0:
+        d = geo.iterPoints()[0].dictAttribValue("h3dm_xform")
+    if not d or "origin_text" not in d and "origin" not in d:
+        return None
+    gx = GlobalXform.from_dict(d)
+    if gx is None or not (gx.unit_m > 0 and gx.scale > 0):
+        return None
+    return gx
+
+
+def _xform_input_connected(node):
+    owner = _owner(node)
+    try:
+        return owner.input(0) is not None if owner is not node else bool(node.inputs() and node.inputs()[0])
+    except Exception:
+        return False
 
 
 def resolve_xform(node, opt, path, f):
-    """Сдвиг: со входа (если подключён Xform) или по режиму."""
+    """Сдвиг: со входа Xform (если подключён — строго) или по режиму вкладки Global Transform."""
     from . import rhino_read
     from .xform import GlobalXform, choose_origin
     d = rhino_read.doc_info(f)
-    inp = None
-    try:
-        ins = node.inputs()
-        if ins and ins[0] is not None:
-            inp = xform_from_geometry(ins[0].geometry())
-    except Exception:
-        inp = None
-    if inp is not None:
+    if _xform_input_connected(node):
+        src = node.inputs()[0].geometry() if node.inputs() and node.inputs()[0] is not None else None
+        inp = xform_from_geometry(src)
+        if inp is None:
+            raise hou.NodeError("The Xform input is connected but carries no valid h3dm_xform. Connect the third "
+                                "output (Xform) of another H3DM 3dm Import, or disconnect the input.")
         if abs(inp.unit_m - d["unit_m"]) > 1e-12:
-            # другой файл в других единицах: origin пересчитываем в единицы этого файла
+            # другой файл в других единицах: origin пересчитываем в единицы этого файла (масштаб сцены тот же)
             inp.origin = inp.origin * inp.unit_m / d["unit_m"]
-        inp.unit_m = d["unit_m"]
+            inp.unit_m = d["unit_m"]
         inp.units = d["units"]
-        inp.scale, inp.yup = opt.scale, opt.yup     # оси и масштаб — с этой ноды
+        # масштаб и оси — со входа (общее пространство); отличие от своих настроек — предупреждение
+        if abs(inp.scale - opt.scale) > 1e-12 or inp.yup != opt.yup:
+            inp.warning = ("Scale / axes come from the Xform input (scale %g, %s); this node's Conversion "
+                           "settings are ignored." % (inp.scale, "Y-up" if inp.yup else "Z-up"))
         inp.source = "input"
         return inp
     bbox = _file_bbox(path, f) if opt.xformmode in ("auto", "auto_far") else None
@@ -190,6 +233,11 @@ def _attr(geo, cls, name, default):
 
 
 def _set_strings(geo, cls, name, values):
+    finder = geo.findPrimAttrib if cls == hou.attribType.Prim else geo.findPointAttrib
+    if values and finder(name) is None and values.count(values[0]) == len(values):
+        # одно значение на все элементы (packed-объект): атрибут со значением по умолчанию — в разы быстрее
+        geo.addAttrib(cls, name, values[0])
+        return
     _attr(geo, cls, name, "")
     if cls == hou.attribType.Prim:
         geo.setPrimStringAttribValues(name, values)
@@ -227,6 +275,59 @@ def _set_dicts(geo, cls, name, values):
     items = geo.iterPrims() if cls == hou.attribType.Prim else geo.iterPoints()
     for el, v in zip(items, values):
         el.setAttribValue(name, v)
+
+
+def _set_dicts_indexed(geo, cls, name, table, idx):
+    """dict-атрибут: значение table[idx[k]] на k-й элемент класса cls (Prim или Point).
+
+    В HOM нет пакетной записи dict-атрибутов, поэлементная — секунды на миллион примитивов. Поэтому значения
+    пишутся по одному на объект во вспомогательную геометрию и разносятся verb attribcopy
+    (Match by Attribute -> To Element по временному индексу объекта)."""
+    idx = np.asarray(idx, dtype=np.int64)
+    n = len(idx)
+    if n == 0:
+        return
+    k = len(table)
+    idx = np.mod(idx, k)                      # -1 = последняя (пустая) запись, как у списков Python
+    if n < 2000 or k == 0:
+        _set_dicts(geo, cls, name, [table[i] for i in idx.tolist()])
+        return
+    used = np.unique(idx)
+    if len(used) == 1:
+        v = table[int(used[0])]
+        if geo.findPrimAttrib(name) if cls == hou.attribType.Prim else geo.findPointAttrib(name):
+            _set_dicts(geo, cls, name, [v] * n)
+        else:
+            geo.addAttrib(cls, name, v)       # одно значение на все элементы — значение по умолчанию
+        return
+    prim = cls == hou.attribType.Prim
+    src = hou.Geometry()
+    if prim:
+        src.createPoints([(0.0, 0.0, 0.0)] * 3)
+        src.createPolygons([(0, 1, 2)] * k)
+        items = src.prims()
+    else:
+        src.createPoints([(0.0, 0.0, 0.0)] * k)
+        items = src.points()
+    src.addAttrib(cls, name, {})
+    for i in used.tolist():
+        if table[i]:
+            items[i].setAttribValue(name, table[i])
+    tmp = "__h3dm_oi"
+    geo.addAttrib(cls, tmp, 0)
+    buf = idx.astype(np.int32).tobytes()
+    (geo.setPrimIntAttribValuesFromString if prim else geo.setPointIntAttribValuesFromString)(tmp, buf)
+    verb = hou.sopNodeTypeCategory().nodeVerb("attribcopy")
+    verb.setParms({"srcgrouptype": 2 if prim else 1, "destgrouptype": 2 if prim else 1, "matchbyattribute": 1,
+                   "matchbyattributemethod": 1, "attributetomatch": tmp, "attrib": 2, "attribname": name,
+                   "class": 4 if prim else 3, "copyp": 0})
+    out = hou.Geometry()
+    verb.execute(out, [geo, src])
+    geo.clear()
+    geo.merge(out)
+    a = geo.findPrimAttrib(tmp) if prim else geo.findPointAttrib(tmp)
+    if a is not None:
+        a.destroy()
 
 
 def _detail(geo, name, value):
@@ -358,27 +459,27 @@ class Builder(object):
         self.mesh_v.append(v)
         self.mesh_vc.append(vc if vc is not None else None)
         self.nv += len(v)
-        for fc in faces:
-            # Rhino: против часовой; Houdini: по часовой — разворачиваем
-            self.mesh_f.append(tuple(base + i for i in reversed(fc)))
-            self.mesh_obj.append(obj)
-            self.mesh_face.append(face)
-            self.mesh_subd.append(subd)
+        flat, lens = _flat_faces(faces)
+        n = len(lens)
+        self.mesh_f += _faces_out(flat, lens, base)
+        self.mesh_obj += [obj] * n
+        self.mesh_face += [face] * n
+        self.mesh_subd += [subd] * n
 
     def add_parts(self, parts, obj, to_h):
         """parts — части в координатах Rhino; to_h — функция точек Rhino -> Houdini (float64)."""
         meshes = [p for p in parts if p["t"] == "mesh"]
         if self.opt.weld and len(meshes) > 1 and not any(p.get("subd") for p in meshes):
-            v, faces, fidx = _weld(meshes, self.tol)
+            v, flat, lens, fidx = _weld(meshes, self.tol)
             base = self.nv
             self.mesh_v.append(to_h(v))
             self.mesh_vc.append(None)
             self.nv += len(v)
-            for fc, fi in zip(faces, fidx):
-                self.mesh_f.append(tuple(base + i for i in reversed(fc)))
-                self.mesh_obj.append(obj)
-                self.mesh_face.append(fi)
-                self.mesh_subd.append(False)
+            n = len(lens)
+            self.mesh_f += _faces_out(flat, lens, base)
+            self.mesh_obj += [obj] * n
+            self.mesh_face += fidx
+            self.mesh_subd += [False] * n
         else:
             for p in meshes:
                 self.add_mesh(to_h(p["v"]), p["f"], obj, p.get("face", -1), p.get("subd", False), p.get("vc"))
@@ -392,16 +493,22 @@ class Builder(object):
             elif t == "nsurf":
                 cv = p["cv"]
                 item = {"kind": "surface", "cv": to_h(cv.reshape(-1, 3)).reshape(cv.shape), "w": p["w"],
+                        "trims": p.get("trims"),
                         "order_u": p["order_u"], "order_v": p["order_v"], "knots_u": p["knots_u"], "knots_v": p["knots_v"]}
-                self.nurbs.append((item, obj, p.get("face", -1), False, bool(p.get("trimmed")), bool(p.get("to_polys"))))
+                trimmed = (2 if p.get("trims") else 1) if p.get("trimmed") else 0
+                self.nurbs.append((item, obj, p.get("face", -1), False, trimmed, bool(p.get("to_polys"))))
             elif t == "points":
                 self.cloud.append((to_h(p["v"]), p.get("c"), obj))
 
     # --- запись
     def write(self, geo):
         """-> (obj index на примитив, face на примитив, флаги групп) в порядке примитивов geo."""
-        prim_obj, prim_face, groups = [], [], {GROUP_TRIM: [], GROUP_TRIMMED: [], GROUP_SUBD: []}
+        prim_obj, prim_face, groups = [], [], {GROUP_TRIM: [], GROUP_TRIMMED: [], GROUP_TRIMMED_EXACT: [], GROUP_SUBD: []}
         self.point_colors = []    # (первая точка, цвета (N,3)) — цвета вершин сеток
+        tg = {}                   # группа типа -> индексы примитивов (известны по порядку записи)
+
+        def typed(name, start, count):
+            tg.setdefault(name, []).extend(range(start, start + count))
         self.cloud_points = []    # (первая точка, число, цвета или None, объект)
         # 1) полигоны
         if self.mesh_f:
@@ -417,6 +524,7 @@ class Builder(object):
                     self.point_colors.append((k, np.asarray(c, dtype=np.float32)))
                 k += len(v)
             n0 = len(prim_obj)
+            typed(TYPE_GROUPS["Poly"], n0, len(self.mesh_obj))
             prim_obj += self.mesh_obj
             prim_face += self.mesh_face
             groups[GROUP_SUBD] += [n0 + i for i, s in enumerate(self.mesh_subd) if s]
@@ -433,6 +541,7 @@ class Builder(object):
                 polys.append(tuple(range(k, k + len(v))))
                 k += len(v)
             geo.createPolygons(polys, closed)
+            typed(TYPE_GROUPS["Poly"], len(prim_obj), len(sel))
             prim_obj += [o for _, o in sel]
             prim_face += [-1] * len(sel)
         # 3) NURBS через JSON-геометрию (точные узлы и веса); поверхности без сетки в файле -> Convert в полигоны
@@ -452,12 +561,18 @@ class Builder(object):
                 geo.merge(ng)
                 for k, i in enumerate(order):
                     item, obj, face, trim, trimmed, _ = self.nurbs[i]
+                    if convert:
+                        tg.setdefault(TYPE_GROUPS["Poly"], []).append(n0 + k)
+                    else:
+                        tg.setdefault(TYPE_GROUPS["NURBMesh" if item["kind"] == "surface" else "NURBCurve"], []).append(n0 + k)
                     prim_obj.append(obj)
                     prim_face.append(face)
                     if trim:
                         groups[GROUP_TRIM].append(n0 + k)
-                    if trimmed:
+                    if trimmed == 1:
                         groups[GROUP_TRIMMED].append(n0 + k)
+                    elif trimmed == 2:
+                        groups[GROUP_TRIMMED_EXACT].append(n0 + k)
         # 4) облака точек — отдельные точки без примитивов
         for v, c, obj in self.cloud:
             base = geo.intrinsicValue("pointcount")
@@ -470,15 +585,17 @@ class Builder(object):
             prim = geo.createPackedGeometry(frozen, pt)
             if A is not None:
                 _set_packed_transform(prim, A)
+            tg.setdefault(TYPE_GROUPS["PackedGeometry"], []).append(len(prim_obj))
             prim_obj.append(obj)
             prim_face.append(-1)
+        groups.update(tg)
         return prim_obj, prim_face, groups
 
 
 def _load_nurbs(items):
-    """Список NURBS -> hou.Geometry через временный .geo (JSON)."""
+    """Список NURBS -> hou.Geometry через временный .bgeo (двоичный JSON Houdini)."""
     from . import houjson
-    tmp = os.path.join(tempfile.gettempdir(), "h3dm_nurbs_%d.geo" % os.getpid())
+    tmp = os.path.join(tempfile.gettempdir(), "h3dm_nurbs_%d.bgeo" % os.getpid())
     houjson.dump(items, tmp)
     ng = hou.Geometry()
     ng.loadFromFile(tmp)
@@ -513,8 +630,32 @@ def _set_packed_transform(prim, A):
         prim.setTransform(hou.Matrix4([[t[0], t[1], t[2], 0], [t[3], t[4], t[5], 0], [t[6], t[7], t[8], 0], [0, 0, 0, 1]]))
 
 
+def _flat_faces(faces):
+    """Грани (кортежи по 3–4 индекса) -> (плоский массив индексов, длины граней)."""
+    lens = np.fromiter(map(len, faces), dtype=np.int64, count=len(faces))
+    flat = np.fromiter(itertools.chain.from_iterable(faces), dtype=np.int64, count=int(lens.sum()))
+    return flat, lens
+
+
+def _faces_out(flat, lens, base):
+    """Развернуть обход каждой грани (Rhino — против часовой, Houdini — по часовой), прибавить base."""
+    n = len(lens)
+    if n == 0:
+        return []
+    if (lens == lens[0]).all():
+        k = int(lens[0])
+        return list(map(tuple, (flat.reshape(n, k)[:, ::-1] + base).tolist()))
+    starts = np.cumsum(lens) - lens
+    rep_s = np.repeat(starts, lens)
+    rep_n = np.repeat(lens, lens)
+    within = np.arange(len(flat), dtype=np.int64) - rep_s
+    out = (flat[rep_s + rep_n - 1 - within] + base).tolist()
+    return [tuple(out[a:a + k]) for a, k in zip(starts.tolist(), lens.tolist())]
+
+
 def _weld(meshes, tol):
-    """Слить сетки граней одного объекта: общие вершины по координатам (допуск tol, double)."""
+    """Слить сетки граней одного объекта: общие вершины по координатам (допуск tol, double).
+    -> (вершины, плоские индексы граней, длины граней, номер грани Brep на каждую грань)."""
     V = np.concatenate([m["v"] for m in meshes])
     q = np.round(V / max(tol, 1e-12)).astype(np.int64)
     uniq, inv = np.unique(q, axis=0, return_inverse=True)
@@ -523,13 +664,15 @@ def _weld(meshes, tol):
     order = np.arange(len(V))[::-1]
     first[inv[order]] = order
     Vw = V[first]
-    faces, fidx, base = [], [], 0
+    flats, lens, fidx, base = [], [], [], 0
     for m in meshes:
-        for fc in m["f"]:
-            faces.append(tuple(int(inv[base + i]) for i in fc))
-            fidx.append(m.get("face", -1))
+        fl, ln = _flat_faces(m["f"])
+        flats.append(fl + base)
+        lens.append(ln)
+        fidx += [m.get("face", -1)] * len(ln)
         base += len(m["v"])
-    return Vw, faces, fidx
+    flat = inv[np.concatenate(flats)] if flats else np.zeros(0, dtype=np.int64)
+    return Vw, flat, np.concatenate(lens) if lens else np.zeros(0, dtype=np.int64), fidx
 
 
 # ---------------------------------------------------------------- готовка
@@ -547,6 +690,21 @@ def cook(node, output=0):
     if not has_rhino3dm():
         raise hou.NodeError("rhino3dm is not installed. Run H3DM > Install / Update rhino3dm.")
     opt = read_options(owner)
+    # дисковый кэш: ключ строится ДО чтения файла (файл при попадании не читается вовсе)
+    key = None
+    if bool(_ev(owner, "diskcache", 0)):
+        from . import geocache
+        cdir = hou.text.expandString(_ev(owner, "cachedir", "") or "")
+        key = geocache.make_key(path, output, opt, _input_xform_dict(node))
+        if node.path() in _BYPASS:
+            _BYPASS.discard(node.path())
+        else:
+            ok, meta = geocache.load(geo, key, cdir)
+            if ok:
+                if (meta or {}).get("warning"):
+                    node.addWarning(meta["warning"])
+                return
+    t0 = time.time()
     try:
         f = open_file(path)
     except Exception as ex:
@@ -554,17 +712,39 @@ def cook(node, output=0):
     unit_m = _unit_m(f)
     if opt.curvetol <= 0:
         opt.curvetol = 0.001 / unit_m          # авто: 1 мм в единицах модели
+    if opt.trimtol <= 0:
+        opt.trimtol = 0.0001 / unit_m          # авто: 0,1 мм в единицах модели
     gx = resolve_xform(node, opt, path, f)
+    warning = getattr(gx, "warning", None)
     if output == 2:
         pt = geo.createPoint()
         _write_xform(geo, gx, hou.attribType.Point, pt)
         _write_xform(geo, gx)
-        return
-    naming = Naming(opt, f)
-    if output == 1:
-        _cook_info(node, geo, f, opt, gx, naming)
-        return
-    _cook_geometry(node, geo, f, opt, gx, naming)
+        if warning:
+            node.addWarning(warning)
+    else:
+        naming = Naming(opt, f)
+        if output == 1:
+            _cook_info(node, geo, f, opt, gx, naming)
+            warning = None
+        else:
+            warning = _cook_geometry(node, geo, f, opt, gx, naming)
+    if key is not None and time.time() - t0 >= float(_ev(owner, "cachemin", 0.5)):
+        geocache.save(geo, key, {"warning": warning, "file": path, "output": output,
+                                 "cook_s": round(time.time() - t0, 3)},
+                      cdir, float(_ev(owner, "cachelimit", geocache.DEFAULT_LIMIT_MB)))
+
+
+def _input_xform_dict(node):
+    """Трансформ со входа Xform для ключа кэша (та же строгая проверка, что в resolve_xform)."""
+    if not _xform_input_connected(node):
+        return None
+    src = node.inputs()[0].geometry() if node.inputs() and node.inputs()[0] is not None else None
+    inp = xform_from_geometry(src)
+    if inp is None:
+        raise hou.NodeError("The Xform input is connected but carries no valid h3dm_xform. Connect the third "
+                            "output (Xform) of another H3DM 3dm Import, or disconnect the input.")
+    return inp.as_dict()
 
 
 def _unit_m(f):
@@ -598,7 +778,7 @@ def _cook_geometry(node, geo, f, opt, gx, naming):
         objs.append(rec)
         inst = [p for p in rec["parts"] if p["t"] == "instance"]
         other = [p for p in rec["parts"] if p["t"] != "instance"]
-        if opt.surfout == "packed":
+        if opt.packed:
             if inst and opt.blocks == "expand":
                 # Packed + Expand: каждый объект блока — свой packed-примитив
                 if other:
@@ -624,18 +804,29 @@ def _cook_geometry(node, geo, f, opt, gx, naming):
     groups = _emit(geo, b, objs, ctx)
     write_document(geo, f, naming)
     _write_xform(geo, gx)
-    warns = list(naming.m.warnings)
+    warns = ([gx.warning] if getattr(gx, "warning", None) else []) + list(naming.m.warnings)
     st = ctx.stats
     if st.get("faces_without_mesh"):
         warns.append("%d trimmed faces have no render mesh in the file (saved with Save Small?) and were skipped. "
-                     "Own tessellation of trimmed faces comes in H3DM 0.3; until then re-save the file in Rhino "
-                     "with render meshes." % st["faces_without_mesh"])
+                     "Use Prepare in Rhino (or re-save the file in Rhino with render meshes)." % st["faces_without_mesh"])
+    if st.get("trimmed_untrimmed"):
+        warns.append("%d trimmed faces came as untrimmed NURBS + boundary curves (group rhino_trimmed_surfaces): "
+                     "the file has no trim curves. Use Prepare in Rhino for exact trimmed NURBS."
+                     % st["trimmed_untrimmed"])
+    if st.get("subd_not_prepared"):
+        warns.append("%d SubD objects stay meshes: Prepare in Rhino converts SubD to NURBS." % st["subd_not_prepared"])
+    if st.get("mesh_not_nurbs"):
+        warns.append("%d Rhino meshes stay meshes (a mesh has no NURBS form)." % st["mesh_not_nurbs"])
     if st.get("skipped_kinds"):
         warns.append("Skipped object types: %s" % ", ".join("%s x%d" % kv for kv in st["skipped_kinds"].items()))
     if warns:
         _detail(geo, "h3dm_warnings", warns)
-        for w in warns[:5]:
-            node.addWarning(w)
+        # Houdini показывает только последнее addWarning — одно сообщение со всеми пунктами
+        text = "\n".join(warns[:8]) + ("\n... (%d more in detail h3dm_warnings)" % (len(warns) - 8)
+                                         if len(warns) > 8 else "")
+        node.addWarning(text)
+        return text
+    return None
 
 
 def _emit(geo, b, objs, ctx):
@@ -786,14 +977,21 @@ def _object_values(objs, opt, naming):
     return out
 
 
+def _take(col, idx):
+    """[col[i] for i in idx]; для одного объекта на все элементы — без цикла."""
+    n = len(idx)
+    if n and idx[0] == idx[-1] and (idx == idx[0]).all():
+        return [col[int(idx[0])]] * n
+    return [col[i] for i in idx.tolist()]
+
+
 def _write_object_attribs(geo, cls, vals, idx, ctx, with_color=True):
     """Атрибуты объектов на элементы класса cls; idx — индекс объекта для каждого элемента."""
     opt, naming = ctx.opt, ctx.naming
     idx = np.asarray(idx, dtype=np.int64)
 
     def per(key):
-        col = vals[key]
-        return [col[i] for i in idx]
+        return _take(vals[key], idx)
 
     _set_strings(geo, cls, "layer", per("layer"))
     _set_strings(geo, cls, "name", per("name"))
@@ -820,8 +1018,14 @@ def _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, ctx):
     n = len(prim_obj)
     if n == 0:
         return
-    if len(geo.prims()) != n:
-        raise hou.NodeError("internal: primitive count mismatch (%d vs %d)" % (len(geo.prims()), n))
+    if geo.intrinsicValue("primitivecount") != n:
+        raise hou.NodeError("internal: primitive count mismatch (%d vs %d)" % (geo.intrinsicValue("primitivecount"), n))
+    cache = {}
+
+    def prims():
+        if "p" not in cache:
+            cache["p"] = geo.prims()
+        return cache["p"]
     vals = _object_values(objs, ctx.opt, ctx.naming)
     P = hou.attribType.Prim
     _write_object_attribs(geo, P, vals, prim_obj, ctx)
@@ -831,28 +1035,38 @@ def _write_prim_attribs(geo, objs, prim_obj, prim_face, groups, ctx):
         for pi, oi in enumerate(prim_obj):
             for g in vals["groups"][oi]:
                 by_group.setdefault(g, []).append(pi)
-        _make_groups(geo, by_group, ctx.naming)
-    prims = None
+        _make_groups(geo, by_group, ctx.naming, prims)
     for gname, members in groups.items():
         if members:
-            prims = prims or geo.prims()
-            grp = geo.findPrimGroup(gname) or geo.createPrimGroup(gname)
-            grp.add([prims[i] for i in members])
+            _group_add(geo, gname, members, prims)
 
 
-def _make_groups(geo, by_group, naming):
-    prims = geo.prims()
+def _group_add(geo, name, members, prims):
+    grp = geo.findPrimGroup(name) or geo.createPrimGroup(name)
+    pr = prims()
+    if len(members) == len(pr) and members[0] == 0 and members[-1] == len(pr) - 1:
+        grp.add(pr)                      # все примитивы (packed-объект) — без построения списка
+    else:
+        grp.add([pr[i] for i in members])
+
+
+def _make_groups(geo, by_group, naming, prims=None):
+    if prims is None:
+        cache = []
+
+        def prims():
+            if not cache:
+                cache.append(geo.prims())
+            return cache[0]
     for g, members in by_group.items():
-        name = naming.group(g)
-        grp = geo.findPrimGroup(name) or geo.createPrimGroup(name)
-        grp.add([prims[i] for i in members])
+        _group_add(geo, naming.group(g), members, prims)
 
 
 def _write_user_text(geo, cls, ut_list, idx, opt, naming):
     if not any(ut_list):
         return
     if opt.usertext:
-        _set_dicts(geo, cls, "user_text", [ut_list[i] for i in idx])
+        _set_dicts_indexed(geo, cls, "user_text", ut_list, idx)
     if not opt.utflat:
         return
     import fnmatch
@@ -875,7 +1089,7 @@ def _write_user_text(geo, cls, ut_list, idx, opt, naming):
             arr = np.array([float(v) if v not in (None, "") else 0.0 for v in col], dtype=np.float64)
             _set_floats(geo, cls, attr, arr[idx], 1, 0.0)
         else:
-            _set_strings(geo, cls, attr, [(col[i] or "") for i in idx])
+            _set_strings(geo, cls, attr, _take([(v or "") for v in col], np.asarray(idx, dtype=np.int64)))
 
 
 def _write_cloud_attribs(geo, b, objs, ctx):
@@ -1009,6 +1223,9 @@ def write_document(geo, f, naming=None):
     _detail(geo, "rhino_units", d["units"])
     _detail(geo, "rhino_unit_m", float(d["unit_m"]))
     _detail(geo, "rhino_doc_text", rhino_read.doc_strings(f))
+    stamp = rhino_read.prepare_stamp(f)
+    if stamp:
+        _detail(geo, "h3dm_prepare", _clean(stamp))
     _detail(geo, "rhino_layers", _clean(rhino_read.layers(f)) or [{}])
     _detail(geo, "rhino_materials", _clean(rhino_read.materials(f)) or [{}])
     _detail(geo, "rhino_groups", _clean(rhino_read.groups(f)) or [{}])

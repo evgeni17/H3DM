@@ -222,11 +222,15 @@ class NameMapper(object):
 
     def prepare_groups(self, originals):
         uniq = list(dict.fromkeys(o for o in originals if o))
-        for o in sorted(uniq, key=lambda o: self._ident_candidate(o) != o):
+        for o in sorted(uniq, key=lambda o: self._group_candidate(o) != o):
             self.group(o)
 
+    def _group_candidate(self, original):
+        c = self._ident_candidate(original) or "group"
+        return ("rhino_" + c) if c.startswith("h3dm_type_") else c     # префикс h3dm_type_ — служебный
+
     def group(self, original):
-        return self._resolve(("g", original), ("g",), original, self._ident_candidate(original) or "group")
+        return self._resolve(("g", original), ("g",), original, self._group_candidate(original))
 
     def prepare_attribs(self, originals, reserved=()):
         uniq = list(dict.fromkeys(o for o in originals if o))
@@ -263,4 +267,7 @@ def number_kind(values):
         digits = mant.replace(".", "").lstrip("0")
         if len(digits) > 7:
             return None
+        x = float(v)
+        if x != 0.0 and not (1.1754943508222875e-38 <= abs(x) <= 3.4028234663852886e+38):
+            return None      # вне диапазона float32: бесконечность или потеря до 0
     return "float"

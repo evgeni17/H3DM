@@ -20,14 +20,32 @@ Output 1 is the geometry. Output 2 (*Info*) holds points for text dots, texts, d
 3dm File:
     Rhino 3–8 file.
 File Info:
-    Object counts by type, units, render meshes, trimmed faces, Cyrillic names and the layer tree.
-Surface Output:
-    *NURBS Patches* — every Brep face becomes a Houdini NURBS surface with the exact degree, knots and weights.
-    Trimmed faces use the render mesh stored in the file, or (with __Trimmed Faces as Untrimmed NURBS + Boundary
-    Curves__) the full untrimmed surface plus its boundary curves — the trimmed shape itself is not rebuilt.
-    *Polygons* — render meshes stored in the file; untrimmed faces without one are converted by Houdini, trimmed faces
-    without one are skipped with a warning (own tessellation comes in 0.3). *Packed* — one packed primitive per Rhino
-    object; blocks become packed instances (with Blocks = Expand, every block object is its own packed primitive).
+    Object counts by type, units, render meshes, trimmed faces, Cyrillic names, the layer tree and, for a prepared
+    copy, the Prepare in Rhino stamp (Rhino version, mesh settings, source file).
+Prepare in Rhino:
+    Sends the file to a running Rhino 8 (Mac or Windows). Rhino opens it headless (your open document is not
+    touched), creates render meshes for every face, stores the exact 2D trim curves, converts SubD to NURBS and
+    saves `<name>_h3dm_v###.3dm` next to the source; then 3dm File switches to that copy. The same source with the
+    same settings reuses the existing copy. Houdini is not blocked while Rhino works; press the button again to stop
+    waiting. Settings are on the *Prepare* tab. Without Rhino at hand, run `rhino/h3dm_prepare.py` in Rhino
+    (H3DM > Open Rhino Tools Folder) — it prepares the active document.
+Geometry Mode:
+    *Mesh + NURBS Curves* (new nodes) — surfaces and solids as polygons (Rhino render meshes), curves as exact NURBS.
+    *NURBS Surfaces + Mesh Solids* — open surfaces as NURBS, closed solids as polygons.
+    *All NURBS* — everything that has a NURBS form: curves, surfaces, trimmed faces as exact trimmed NURBS (prepared
+    files), SubD as NURBS (prepared files). Rhino meshes stay meshes with a warning. Without preparation trimmed
+    faces become untrimmed NURBS + boundary curves (group `rhino_trimmed_surfaces`) and a warning names
+    Prepare in Rhino.
+    *Legacy* keeps the 0.2 behaviour (Surface Output) of older scenes.
+Pack per Object:
+    One packed primitive per Rhino object, contents follow the mode. Independent of the mode.
+Type groups:
+    Every output primitive is in exactly one of `h3dm_type_polygon`, `h3dm_type_nurbs_curve`,
+    `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`, `h3dm_type_other` (real type after all conversions).
+    Exact trimmed faces are also in `rhino_trimmed_exact`.
+Trim Curve Tolerance:
+    Houdini ignores the weights of trim curves, so rational trims (arcs) become polylines within this deviation.
+    0 = 0.1 mm in model units.
 Skip Hidden / Skip Locked:
     Applied the same way to the Geometry and Info outputs and to objects inside blocks (an object on a hidden or
     locked layer is skipped; block objects follow their own layer, as in Rhino).
@@ -51,13 +69,15 @@ Layer Case:
 
 Detail: `d@rhino_doc` (units, tolerances, authors, earth anchor), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
-`d[]@rhino_blocks`, `d@h3dm_name_map`.
+`d[]@rhino_blocks`, `d@h3dm_name_map`, `d@h3dm_prepare` (stamp of a prepared copy), `s[]@h3dm_warnings`.
 
 @inputs
 
 Xform:
-    Optional. The *Xform* output of another H3DM 3dm Import. Its shift is used instead of the Global Transform tab,
-    so several Rhino files of one project land in the same Houdini coordinates.
+    Optional. The *Xform* output of another H3DM 3dm Import. Its shift, scale and axes are used instead of the
+    Global Transform tab, so several Rhino files of one project land in the same Houdini coordinates. If the input
+    is connected but carries no H3DM transform, the node stops with an error; if its scale or axes differ from this
+    node's settings, the input wins and a warning says so.
 
 @outputs
 
@@ -85,6 +105,14 @@ bounding box centre in X/Y and its bottom in Z, rounded to __Round To__ (1 m), s
 The exact origin is kept in `d@h3dm_xform` / `s@h3dm_origin` (dictionary and string attributes keep double
 precision). `4@global_xform` is the same move as a float32 matrix for Transform By Attribute — fine for viewing,
 not exact for far models.
+
+@cache Disk cache
+
+With __Disk Cache__ (Cache tab) the cooked Geometry and Info outputs are stored as `.bgeo.sc` in
+`$HOUDINI_TEMP_DIR/h3dm_cache` (or __Cache Folder__ / `$H3DM_CACHE`). The key covers the file (path, size, time),
+every parameter, the global transform (Xform input included) and the H3DM and Houdini versions, so any change cooks
+again; the least recently used entries are removed above __Size Limit__. *Reload* skips the cache once,
+*Clear Disk Cache* empties the folder.
 """
 
 HELP_IMPORT_RU = u"""= H3DM 3dm Import =
@@ -105,14 +133,32 @@ HELP_IMPORT_RU = u"""= H3DM 3dm Import =
 3dm File:
     Файл Rhino 3–8.
 File Info:
-    Число объектов по типам, единицы, наличие render mesh, обрезанные грани, кириллические имена и дерево слоёв.
-Surface Output:
-    *NURBS Patches* — каждая грань Brep становится NURBS-поверхностью Houdini с точными степенью, узлами и весами.
-    Обрезанные грани берутся сетками отображения из файла или (галочка __Trimmed Faces as Untrimmed NURBS + Boundary
-    Curves__) остаются полной необрезанной поверхностью плюс кривые границ — сама обрезанная форма не строится.
-    *Polygons* — сетки отображения из файла; необрезанные грани без сетки конвертирует Houdini, обрезанные без сетки
-    пропускаются с предупреждением (своё разбиение — в 0.3). *Packed* — по packed-примитиву на объект Rhino, блоки —
-    packed-экземпляры (при Blocks = Expand каждый объект блока — свой packed-примитив).
+    Число объектов по типам, единицы, наличие render mesh, обрезанные грани, кириллические имена, дерево слоёв и
+    для подготовленной копии — штамп Prepare in Rhino (версия Rhino, настройки сетки, исходный файл).
+Prepare in Rhino:
+    Отправляет файл в запущенный Rhino 8 (Mac или Windows). Rhino открывает его без окна (открытый документ не
+    трогается), строит сетки отображения для всех граней, сохраняет точные 2D-кривые обрезки, переводит SubD в NURBS
+    и пишет `<имя>_h3dm_v###.3dm` рядом с исходником; затем 3dm File переключается на эту копию. Тот же исходник
+    с теми же настройками берёт уже готовую копию. Houdini не блокируется, пока Rhino работает; повторное нажатие
+    прекращает ожидание. Настройки — вкладка *Prepare*. Можно и вручную: `rhino/h3dm_prepare.py` в Rhino
+    (H3DM > Open Rhino Tools Folder) готовит активный документ.
+Geometry Mode:
+    *Mesh + NURBS Curves* (новые ноды) — поверхности и тела полигонами (сетки отображения Rhino), кривые точными NURBS.
+    *NURBS Surfaces + Mesh Solids* — открытые поверхности NURBS, замкнутые тела полигонами.
+    *All NURBS* — всё, что имеет NURBS-форму: кривые, поверхности, обрезанные грани — точными обрезанными NURBS
+    (подготовленные файлы), SubD — NURBS (подготовленные файлы). Сетки Rhino остаются сетками с предупреждением.
+    Без подготовки обрезанные грани приходят необрезанной NURBS + кривые границ (группа `rhino_trimmed_surfaces`),
+    предупреждение предлагает Prepare in Rhino.
+    *Legacy* сохраняет поведение 0.2 (Surface Output) в старых сценах.
+Pack per Object:
+    По packed-примитиву на объект Rhino, содержимое — по режиму. Не зависит от режима.
+Группы типов:
+    Каждый примитив выхода входит ровно в одну из групп `h3dm_type_polygon`, `h3dm_type_nurbs_curve`,
+    `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`, `h3dm_type_other` (фактический тип после всех
+    преобразований). Точные обрезанные грани — ещё и в `rhino_trimmed_exact`.
+Trim Curve Tolerance:
+    Houdini не учитывает веса кривых обрезки, поэтому рациональные кривые (дуги) становятся ломаными в пределах
+    этого отклонения. 0 = 0,1 мм в единицах модели.
 Skip Hidden / Skip Locked:
     Одинаково для выходов Geometry и Info и для объектов внутри блоков (объект на скрытом или заблокированном слое
     пропускается; объекты блока подчиняются своему слою, как в Rhino).
@@ -137,13 +183,15 @@ Layer Case:
 
 Detail: `d@rhino_doc` (единицы, допуски, авторы, гео-привязка), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
-`d[]@rhino_blocks`, `d@h3dm_name_map`.
+`d[]@rhino_blocks`, `d@h3dm_name_map`, `d@h3dm_prepare` (штамп подготовленной копии), `s[]@h3dm_warnings`.
 
 @inputs
 
 Xform:
-    Необязательный. Выход *Xform* другого H3DM 3dm Import. Его сдвиг используется вместо вкладки Global Transform —
-    несколько файлов Rhino одного проекта встают в одни и те же координаты Houdini.
+    Необязательный. Выход *Xform* другого H3DM 3dm Import. Его сдвиг, масштаб и оси используются вместо вкладки
+    Global Transform — несколько файлов Rhino одного проекта встают в одни и те же координаты Houdini. Если вход
+    подключён, но не несёт трансформа H3DM, нода останавливается с ошибкой; если масштаб или оси входа отличаются
+    от настроек ноды, побеждает вход, и об этом говорит предупреждение.
 
 @outputs
 
@@ -169,6 +217,14 @@ Rhino хранит координаты в double (64 бита), Houdini — п�
 по X/Y и его низ по Z, округлённый до __Round To__ (1 м), чтобы сдвиг был «круглым». Точный origin хранится в
 `d@h3dm_xform` / `s@h3dm_origin` (dict- и строковые атрибуты держат double). `4@global_xform` — тот же сдвиг
 матрицей float32 для Transform By Attribute: годится для просмотра, но для далёких моделей неточен.
+
+@cache Дисковый кэш
+
+С __Disk Cache__ (вкладка Cache) готовые выходы Geometry и Info сохраняются как `.bgeo.sc` в
+`$HOUDINI_TEMP_DIR/h3dm_cache` (или __Cache Folder__ / `$H3DM_CACHE`). Ключ учитывает файл (путь, размер, время),
+все параметры, глобальный трансформ (с входом Xform) и версии H3DM и Houdini — любое изменение готовит заново;
+при превышении __Size Limit__ удаляются давно не читанные записи. *Reload* один раз пропускает кэш,
+*Clear Disk Cache* очищает папку.
 """
 
 HELP_EXPORT_EN = u"""= H3DM 3dm Export =

@@ -119,6 +119,41 @@ c = src["periodic_curve"]
 n_fine, n_coarse = len(rr.sample_curve(c, 0.01)), len(rr.sample_curve(c, 50.0))
 check(n_fine > n_coarse, "curve tolerance: %d vs %d" % (n_fine, n_coarse))
 
+# допуск кривых: фактическое максимальное отклонение полилинии от кривой (плотная выборка), не только число вершин
+def _max_dev(curve, poly):
+    dom = curve.Domain
+    worst = 0.0
+    for t in np.linspace(dom.T0, dom.T1, 2001):
+        q = curve.PointAt(t)
+        p = np.array([q.X, q.Y, q.Z])
+        best = 1e300
+        for a, b in zip(poly[:-1], poly[1:]):
+            ab = b - a
+            L = float(np.dot(ab, ab))
+            u = 0.0 if L == 0 else min(1.0, max(0.0, float(np.dot(p - a, ab)) / L))
+            best = min(best, float(np.linalg.norm(p - (a + u * ab))))
+        worst = max(worst, best)
+    return worst
+for nm in ("Сплайн", "Дуга", "Составная кривая"):
+    cc = [o.Geometry for o in f.Objects if o.Attributes.Name == nm][0]
+    for tol in (0.5, 5.0, 50.0):
+        poly = rr.sample_curve(cc, tol)
+        dev = _max_dev(cc, poly)
+        check(dev <= tol * 1.01, "curve tolerance %s tol=%g: real deviation %g" % (nm, tol, dev))
+
+# кривые обрезки: при развороте U направление обхода петли сохраняется (внешняя — против часовой)
+def _signed_area(loop):
+    pts = [pt for c in loop for pt in c["cv"]]
+    return sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(pts, pts[1:] + pts[:1]))
+fd = {"l": [{"t": "Outer", "c": [
+    {"o": 2, "k": [0, 1], "p": [[1, 1, 1], [9, 1, 1]], "r": False},
+    {"o": 2, "k": [0, 1], "p": [[9, 1, 1], [9, 9, 1]], "r": False},
+    {"o": 2, "k": [0, 1], "p": [[9, 9, 1], [1, 9, 1]], "r": False},
+    {"o": 2, "k": [0, 1], "p": [[1, 9, 1], [1, 1, 1]], "r": False}]}]}
+for rev in (False, True):
+    loops = rr.face_profile_loops(fd, rev, (0.0, 10.0), 0.01)
+    check(_signed_area(loops[0]) > 0, "trim loop orientation after reverse=%s" % rev)
+
 if FAIL:
     print("FAILED (%d):" % len(FAIL))
     for x in FAIL:

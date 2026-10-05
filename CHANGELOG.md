@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.3.0 — 2026-10-05
+Requirements from the 0.2.1 review: geometry modes, exact trimmed NURBS, preparation in Rhino, strict Xform input,
+disk cache and speed.
+* **Geometry Mode** replaces Surface Output for new nodes: *Mesh + NURBS Curves* (default), *NURBS Surfaces + Mesh
+  Solids*, *All NURBS*; *Legacy* keeps 0.2 scenes unchanged. *Pack per Object* is a separate toggle for every mode.
+  Closed curves are NURBS in every mode.
+* **Exact trimmed NURBS:** prepared files carry the 2D trim curves; faces become Houdini trimmed NURBS surfaces
+  (profiles + trim regions). Areas match Rhino within 0.04 % on the test fixture. Rational trims become polylines
+  within *Trim Curve Tolerance* (Houdini ignores trim weights). Knot vectors start at 0 (Houdini returns infinities
+  at the edge of a surface whose knots start below 0).
+* **Prepare in Rhino** (button, menu *H3DM › Prepare in Rhino…*): a running Rhino 8 opens the file headless,
+  meshes every face (document mesh settings, coarse or fine, overrides), stores trim curves, converts SubD and
+  extrusions to NURBS and writes `<name>_h3dm_v###.3dm` next to the source with a stamp (source hash, settings,
+  Rhino version). Houdini waits outside the cook and stays responsive; a second press stops waiting; late results,
+  a changed *3dm File* or a deleted node are never overwritten. Same source + settings reuse the existing copy.
+  Paths with spaces and Cyrillic work (RhinoCode is called without the shell wrapper). Several Rhino instances:
+  you pick one. Non-3dm files are refused before Rhino sees them. `rhino/h3dm_prepare.py` also runs by hand in Rhino.
+* **Type groups** `h3dm_type_polygon / nurbs_curve / nurbs_surface / packed_geometry / other`: every primitive is
+  in exactly one, by its real type after all conversions. `rhino_trimmed_exact` marks exact trimmed faces.
+* **Strict Xform input:** a connected input without `h3dm_xform` is an error; scale and axes come from the input
+  (a warning tells when they differ from the node).
+* **Warnings** are collected into one message (Houdini shows only the last `addWarning`) and stored in
+  `s[]@h3dm_warnings`; they name *Prepare in Rhino* where it helps.
+* **Disk cache** (Cache tab, on by default): `.bgeo.sc` per output with a key over file, parameters, Xform input and
+  versions; LRU size limit; *Reload* skips it once, *Clear Disk Cache* empties it. The file is not read on a hit.
+* **Speed** (225 MB test model, separate `hython` runs, cold / repeated cook): Polygons 10.8 / 9.7 s → 5.6 / 4.5 s,
+  Packed 6.5 / 5.5 s → 4.7 / 3.7 s, NURBS Patches 11.1 / 10.5 s → 5.5 / 4.4 s; All NURBS 9.7 / 8.7 s; from the disk
+  cache 1–2 s. User Text dictionaries are written once per object and spread with Attribute Copy (4.8 s → 0.04 s),
+  one value per packed object becomes an attribute default, faces are re-indexed with NumPy, and NURBS go to
+  Houdini as binary JSON (`.bgeo`, written by `h3dm.houjson`) instead of text `.geo` (load 19 s → 0.6 s on 5.3 M
+  control points).
+* File Info shows the preparation stamp; detail `d@h3dm_prepare` holds it; `h3dm.*` Document User Text keys are
+  no longer copied into `rhino_doc_text`.
+* Help, README: modes, type groups, Prepare in Rhino, strict Xform, disk cache.
+
 ## 0.2.1 — 2026-10-05
 Fixes from the independent test report of 0.1–0.2. Every item has a regression test
 (`tests/make_edgecases.py` builds `h3dm_edgecases_v001.3dm`; checks in `test_read.py`, `test_names.py`,

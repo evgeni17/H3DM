@@ -90,13 +90,63 @@ def doc_info(f):
     return info
 
 
-def doc_strings(f):
-    """Document User Text: {ключ: значение}."""
+PREPARE_KEY = "h3dm.prepare"
+
+
+def doc_strings(f, service=False):
+    """Document User Text: {ключ: значение}. Служебные ключи H3DM ("h3dm.*") — только при service=True."""
     out = {}
     for i in range(len(f.Strings)):
         k, v = f.Strings[i]
-        out[k] = v
+        if service or not str(k).startswith("h3dm."):
+            out[k] = v
     return out
+
+
+def prepare_stamp(f):
+    """Отпечаток подготовки (Prepare in Rhino) или None."""
+    import json
+    v = doc_strings(f, service=True).get(PREPARE_KEY)
+    if not v:
+        return None
+    try:
+        return json.loads(v)
+    except Exception:
+        return None
+
+
+def prepare_stamp_text(st):
+    """Краткое описание отпечатка подготовки для File Info."""
+    if not st:
+        return "Not prepared in Rhino (no H3DM stamp)."
+    k = st.get("key", {})
+    src = st.get("source", {})
+    m = st.get("mesh", {})
+    sset = k.get("settings", {})
+    stt = st.get("stats", {})
+    lines = ["Prepared in Rhino %s on %s (prepare script v%s)" % (k.get("rhino", "?"), st.get("created", "?"),
+                                                                 k.get("prep_version", "?")),
+             "  Source: %s" % src.get("path", "?"),
+             "  Mesh preset: %s   tolerance %g, refine angle %g deg, max edge %g"
+             % (sset.get("preset", "normal"), m.get("tolerance", 0) or 0, m.get("refine_angle_deg", 0) or 0,
+                m.get("max_edge", 0) or 0),
+             "  Faces meshed: %s / %s   SubD converted: %s   Breps: %s"
+             % (stt.get("check_faces_meshed", "?"), stt.get("check_faces", "?"), stt.get("subd_converted", 0),
+                stt.get("breps", "?"))]
+    return "\n".join(lines)
+
+
+def prepare_source(path):
+    """Если path — подготовленная копия, вернуть путь исходника (если он существует), иначе path."""
+    import os
+    try:
+        st = prepare_stamp(read(path))
+    except Exception:
+        st = None
+    src = ((st or {}).get("source") or {}).get("path")
+    if src and os.path.isfile(src):
+        return src
+    return path
 
 
 def layers(f):
@@ -206,13 +256,15 @@ def file_info(path):
     if s["block_objects"]:
         lines.append("Objects inside block definitions: %d" % sum(s["block_objects"].values()))
     lines.append("")
+    lines.append(prepare_stamp_text(prepare_stamp(f)))
+    lines.append("")
     lines.append("Brep faces: %d (trimmed %d), with render mesh: %d" % (s["brep_faces"], s["trimmed_faces"],
                                                                       s["faces_with_render_mesh"]))
     if s["extrusions"]:
         lines.append("Extrusions: %d, with render mesh: %d" % (s["extrusions"], s["extrusions_with_render_mesh"]))
     if s["brep_faces"] and s["faces_with_render_mesh"] < s["brep_faces"]:
-        lines.append("  Note: some faces have no render mesh (file saved with Save Small?). Untrimmed ones are "
-                     "converted by Houdini; trimmed ones are skipped until H3DM 0.3 — re-save with meshes.")
+        lines.append("  Note: some faces have no render mesh (file saved with Save Small?). Use Prepare in Rhino "
+                     "to create meshes and exact trims; without it trimmed faces without a mesh are skipped.")
     lines.append("Layers: %d (Cyrillic names: %d)   Object names in Cyrillic: %d"
                  % (s["layers"], s["layers_cyrillic"], s["object_names_cyrillic"]))
     lines.append("Materials: %d   Groups: %d   Blocks: %d" % (s["materials"], s["groups"], s["blocks"]))
@@ -380,16 +432,23 @@ def sample_curve(c, tol):
     ts.append(t1)
     pt = {t: np.array(_pt(c.PointAt(t))) for t in ts}
 
-    def refine(ta, tb, depth):
-        tm = 0.5 * (ta + tb)
-        pm = np.array(_pt(c.PointAt(tm)))
-        pa, pb = pt[ta], pt[tb]
+    def dev_of(p, pa, pb):
         ab = pb - pa
         L = float(np.dot(ab, ab))
-        dev = np.linalg.norm(pm - pa) if L == 0 else np.linalg.norm(np.cross(pm - pa, ab)) / np.sqrt(L)
-        if dev <= tol or depth >= 14:
+        if L == 0:
+            return float(np.linalg.norm(p - pa))
+        t = min(1.0, max(0.0, float(np.dot(p - pa, ab)) / L))
+        return float(np.linalg.norm(p - (pa + t * ab)))
+
+    def refine(ta, tb, depth):
+        # отклонение от хорды проверяется в трёх точках отрезка (1/4, 1/2, 3/4), а не только в середине
+        pa, pb = pt[ta], pt[tb]
+        tm = 0.5 * (ta + tb)
+        probes = [(tq, np.array(_pt(c.PointAt(tq)))) for tq in (ta + 0.25 * (tb - ta), tm, ta + 0.75 * (tb - ta))]
+        dev = max(dev_of(p, pa, pb) for _, p in probes)
+        if dev <= tol or depth >= 16:
             return [tb]
-        pt[tm] = pm
+        pt[tm] = probes[1][1]
         return refine(ta, tm, depth + 1) + refine(tm, tb, depth + 1)
 
     out = [ts[0]]
@@ -526,8 +585,15 @@ def uses_parent(f, tables, idef_id, depth=0, _memo=None):
 
 class Options(object):
     """Параметры извлечения (значения по умолчанию = значения HDA)."""
-    surfout = "nurbs"         # nurbs | polys | packed
-    trimnurbs = False         # обрезанные грани в режиме nurbs: True = необрезанная поверхность + кривые границ
+    # режим первого выхода Geometry:
+    #   legacy         — как в 0.2 (Surface Output: nurbs | polys | packed)
+    #   mesh_curves    — поверхности и тела сетками, кривые NURBS (по умолчанию для новых нод)
+    #   nurbs_surfaces — поверхности (открытые оболочки) NURBS, тела (замкнутые) сетками
+    #   all_nurbs      — всё, что возможно, в NURBS
+    geomode = "legacy"
+    surfout = "nurbs"         # только legacy: nurbs | polys | packed
+    trimnurbs = False         # только legacy: обрезанные грани = необрезанная поверхность + кривые границ
+    pack = False              # упаковка по объекту (независимо от режима)
     rendermesh = True
     curves = "nurbs"          # nurbs | poly
     blocks = "packed"         # packed | expand
@@ -536,6 +602,25 @@ class Options(object):
     skiplocked = False
     types = {"surfaces", "meshes", "subd", "curves", "points", "blocks"}
     curvetol = 0.0            # допуск полилиний, единицы модели (0 = 1 мм)
+    trimtol = 0.0             # допуск ломаных для рациональных кривых обрезки, единицы модели (0 = 0,1 мм)
+
+    @property
+    def packed(self):
+        return self.pack or (self.geomode == "legacy" and self.surfout == "packed")
+
+    def surfaces_as_nurbs(self, solid):
+        if self.geomode == "legacy":
+            return self.surfout == "nurbs"
+        if self.geomode == "all_nurbs":
+            return True
+        if self.geomode == "nurbs_surfaces":
+            return not solid
+        return False
+
+    @property
+    def lines_as_nurbs(self):
+        """Отрезки и полилинии — точные NURBS степени 1 (в новых режимах при Curves = NURBS)."""
+        return self.geomode != "legacy" and self.curves == "nurbs"
 
 
 KIND_TYPE = {
@@ -560,27 +645,155 @@ def layer_filter(patterns):
     return ok
 
 
-def _brep_parts(brep, opt, stats):
-    """Brep -> части: сетки граней / NURBS-грани / кривые границ."""
+# ---------- кривые обрезки из подготовки в Rhino (строка геометрии "h3dm.trims")
+
+def brep_trims(brep):
+    """Данные кривых обрезки, сохранённые rhino/h3dm_prepare.py, или None."""
+    import base64
+    import json
+    import zlib
+    try:
+        s = brep.GetUserString("h3dm.trims")
+    except Exception:
+        s = None
+    if not s:
+        return None
+    try:
+        d = json.loads(zlib.decompress(base64.b64decode(s)).decode("utf-8"))
+    except Exception:
+        return None
+    return {f["f"]: f for f in d.get("faces", [])}
+
+
+def _sample_trim(cv, knots, order, tol):
+    """Рациональная кривая обрезки -> точки ломаной (u, v) с отклонением хорды <= tol (в единицах параметра)."""
+    from .nurbs import eval_curve
+    P = np.array([[p[0], p[1], 0.0] for p in cv], dtype=np.float64)
+    W = np.array([p[2] for p in cv], dtype=np.float64)
+    U = _full_knots(knots)
+    a, b = U[order - 1], U[len(cv)]
+    ks = sorted({k for k in knots if a <= k <= b} | {a, b})
+    ts = []
+    for k0, k1 in zip(ks[:-1], ks[1:]):
+        ts.extend(np.linspace(k0, k1, 5)[:-1].tolist())
+    ts.append(b)
+    pt = {t: eval_curve(P, W, U, order, t)[:2] for t in ts}
+
+    def refine(ta, tb, depth):
+        tm = 0.5 * (ta + tb)
+        pm = eval_curve(P, W, U, order, tm)[:2]
+        pa, pb = pt[ta], pt[tb]
+        ab = pb - pa
+        L = float(np.hypot(*ab))
+        dev = float(np.hypot(*(pm - pa))) if L == 0 else abs(float(ab[0] * (pm - pa)[1] - ab[1] * (pm - pa)[0])) / L
+        if dev <= tol or depth >= 12:
+            return [tb]
+        pt[tm] = pm
+        return refine(ta, tm, depth + 1) + refine(tm, tb, depth + 1)
+
+    out = [ts[0]]
+    for ta, tb in zip(ts[:-1], ts[1:]):
+        out += refine(ta, tb, 0)
+    return [pt[t] for t in out]
+
+
+def face_profile_loops(fdata, reverse, u_domain, tol):
+    """Петли кривых обрезки грани -> [[{'order','knots'(полные),'cv'[(u,v)]}...]...] в UV Houdini.
+
+    Рациональные кривые -> ломаные (Houdini не учитывает веса кривых обрезки); остальные — точно.
+    reverse: U поверхности развёрнут (u' = a + b - u) — отражаем точки и меняем направление обхода петли.
+    """
+    from .nurbs import clamp_curve
+    a, b = u_domain
+    loops = []
+    for lp in fdata.get("l", []):
+        curves = []
+        for c in lp.get("c", []):
+            order = int(c["o"])
+            if c.get("r"):
+                pts = _sample_trim(c["p"], c["k"], order, tol)
+                n = len(pts)
+                kn = [0.0] + list(np.linspace(0.0, 1.0, n)) + [1.0]
+                curves.append({"order": 2, "knots": kn, "cv": [(float(x), float(y)) for x, y in pts]})
+            else:
+                cv = np.array([[p[0], p[1], 0.0] for p in c["p"]], dtype=np.float64)
+                w = np.ones(len(cv))
+                cv, w, kn = clamp_curve(cv, w, _full_knots(c["k"]), order)
+                curves.append({"order": order, "knots": [float(k) for k in kn], "cv": [(float(x), float(y)) for x, y, _ in cv]})
+        if reverse:
+            rev = []
+            for c in reversed(curves):
+                k = c["knots"]
+                k0, k1 = k[0], k[-1]
+                rev.append({"order": c["order"], "knots": [k0 + k1 - x for x in reversed(k)],
+                            "cv": [(a + b - u, v) for u, v in reversed(c["cv"])]})
+            curves = rev
+        loops.append(curves)
+    return loops
+
+
+def _face_nurbs(face, fi, opt, trims, stats, untrimmed):
+    """NURBS-грань: точная (необрезанная или с кривыми обрезки) либо None, если обрезки нет."""
+    rev = houdini_reverse(face.OrientationIsReversed)
+    srf = face.UnderlyingSurface()
+    d = nurbs_surface_data(srf, reverse=rev)
+    if d is None:
+        return None
+    d.update({"t": "nsurf", "face": fi, "trimmed": not untrimmed})
+    if untrimmed:
+        return d
+    fdata = trims.get(fi) if trims else None
+    if fdata is None:
+        return None
+    ns = srf.ToNurbsSurface()
+    dom = ns.Domain(0)
+    d["trims"] = face_profile_loops(fdata, rev, (dom.T0, dom.T1), opt.trimtol)
+    d["rhino_area"] = fdata.get("a")
+    stats["trimmed_exact"] = stats.get("trimmed_exact", 0) + 1
+    return d
+
+
+def _brep_parts(brep, opt, stats, solid=None):
+    """Brep -> части: сетки граней / NURBS-грани (точные, с обрезкой) / кривые границ."""
     r = _r()
     parts = []
+    solid = bool(brep.IsSolid) if solid is None else solid
+    as_nurbs = opt.surfaces_as_nurbs(solid)
+    trims = brep_trims(brep) if as_nurbs and opt.geomode != "legacy" else None
     for fi in range(len(brep.Faces)):
         face = brep.Faces[fi]
         try:
             untrimmed = face.DuplicateFace(False).IsSurface
         except Exception:
             untrimmed = False
-        want_nurbs = opt.surfout == "nurbs" and (untrimmed or opt.trimnurbs)
-        if want_nurbs:
-            d = nurbs_surface_data(face.UnderlyingSurface(), reverse=houdini_reverse(face.OrientationIsReversed))
-            if d is not None:
-                d.update({"t": "nsurf", "face": fi, "trimmed": not untrimmed})
-                parts.append(d)
-                if not untrimmed:
+        if as_nurbs:
+            if opt.geomode == "legacy":
+                if untrimmed or opt.trimnurbs:
+                    d = _face_nurbs(face, fi, opt, None, stats, True)
+                    if d is not None:
+                        d["trimmed"] = not untrimmed
+                        parts.append(d)
+                        if not untrimmed:
+                            for cd in face_boundary_curves(brep, face):
+                                cd.update({"t": "ncurve", "face": fi, "trim": True})
+                                parts.append(cd)
+                        continue
+            else:
+                d = _face_nurbs(face, fi, opt, trims, stats, untrimmed)
+                if d is not None:
+                    parts.append(d)
+                    continue
+                # обрезанная грань без кривых обрезки (файл не подготовлен в Rhino):
+                # необрезанная поверхность + кривые границ, с предупреждением
+                d = _face_nurbs(face, fi, opt, None, stats, True)
+                if d is not None:
+                    d["trimmed"] = True
+                    parts.append(d)
                     for cd in face_boundary_curves(brep, face):
                         cd.update({"t": "ncurve", "face": fi, "trim": True})
                         parts.append(cd)
-                continue
+                    stats["trimmed_untrimmed"] = stats.get("trimmed_untrimmed", 0) + 1
+                    continue
         mesh = face.GetMesh(r.MeshType.Any) if opt.rendermesh else None
         if mesh is not None:
             v, faces, _ = mesh_arrays(mesh)
@@ -603,7 +816,9 @@ def geometry_parts(g, opt, stats):
     if isinstance(g, r.Brep):
         return _brep_parts(g, opt, stats)
     if isinstance(g, r.Extrusion):
-        m = g.GetMesh(r.MeshType.Any) if (opt.rendermesh and opt.surfout != "nurbs") else None
+        solid = bool(g.IsSolid)
+        as_nurbs = opt.surfaces_as_nurbs(solid)
+        m = g.GetMesh(r.MeshType.Any) if (opt.rendermesh and not as_nurbs) else None
         if m is not None:
             v, faces, _ = mesh_arrays(m)
             return [{"t": "mesh", "v": v, "f": faces, "face": -1}]
@@ -611,9 +826,12 @@ def geometry_parts(g, opt, stats):
         if b is None:
             return []
         local = {}
-        parts = _brep_parts(b, opt, local)
+        parts = _brep_parts(b, opt, local, solid)
+        for key, val in local.items():
+            if key != "faces_without_mesh":
+                stats[key] = stats.get(key, 0) + val
         if local.get("faces_without_mesh"):
-            # торцы — обрезанные плоскости без сетки: берём сетку всего объекта (своё разбиение — этап 4)
+            # торцы — обрезанные плоскости без сетки: берём сетку всего объекта
             m = g.GetMesh(r.MeshType.Any) if opt.rendermesh else None
             if m is not None:
                 v, faces, _ = mesh_arrays(m)
@@ -624,12 +842,14 @@ def geometry_parts(g, opt, stats):
         d = nurbs_surface_data(g, reverse=houdini_reverse(False))
         if d is None:
             return []
-        d.update({"t": "nsurf", "face": 0, "trimmed": False, "to_polys": opt.surfout != "nurbs"})
+        d.update({"t": "nsurf", "face": 0, "trimmed": False, "to_polys": not opt.surfaces_as_nurbs(False)})
         return [d]
     if isinstance(g, r.Mesh):
         res = mesh_arrays(g, colors=True)
         if res is None:
             return []
+        if opt.geomode == "all_nurbs":
+            stats["mesh_not_nurbs"] = stats.get("mesh_not_nurbs", 0) + 1
         v, faces, vc = res
         return [{"t": "mesh", "v": v, "f": faces, "face": -1, "vc": vc}]
     if isinstance(g, r.SubD):
@@ -637,9 +857,12 @@ def geometry_parts(g, opt, stats):
         res = mesh_arrays(m)
         if res is None:
             return []
+        if opt.geomode in ("all_nurbs", "nurbs_surfaces"):
+            stats["subd_not_prepared"] = stats.get("subd_not_prepared", 0) + 1
         return [{"t": "mesh", "v": res[0], "f": res[1], "face": -1, "subd": True}]
     if isinstance(g, r.Curve):
-        if isinstance(g, (r.LineCurve, r.PolylineCurve)) or opt.curves == "poly":
+        is_line = isinstance(g, (r.LineCurve, r.PolylineCurve))
+        if opt.curves == "poly" or (is_line and not opt.lines_as_nurbs):
             v = sample_curve(g, opt.curvetol)
             closed = bool(g.IsClosed) and len(v) > 2
             if closed and np.allclose(v[0], v[-1]):

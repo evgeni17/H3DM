@@ -59,6 +59,10 @@ m3 = names.NameMapper(names.MODE_KEEP)
 eq(m3.layer("Фасад::Панели"), "Фасад::Панели", "keep mode")
 eq(m3.group("Группа 1"), "Gruppa_1", "group always safe")
 
+# служебный префикс групп типов не занимается группами Rhino
+m5 = names.NameMapper()
+eq(m5.group("h3dm_type_polygon"), "rhino_h3dm_type_polygon", "reserved type group prefix")
+
 # латинские имена резервируются раньше транслита; порядок детерминирован
 m4 = names.NameMapper()
 m4.prepare_layers(["Корень", "Корень::Еда", "Корень::Эда", "Koren", "Koren::Eda", "Koren::Eda_2"])
@@ -78,7 +82,8 @@ eq(got[1:], ["ut_name", "id"], "existing ut_name keeps its name")
 # числа User Text: только без потерь
 for vals, kind in ((["123456789"], "int"), (["42", "-7"], "int"), (["007"], None), (["12345678901"], None),
                    (["0.25", "1.5"], "float"), (["3.14159265"], None), (["1e3"], "float"), (["P-001"], None),
-                   (["12", "3.5"], "float"), ([""], None), (["0"], "int")):
+                   (["12", "3.5"], "float"), ([""], None), (["0"], "int"),
+                   (["1e39"], None), (["1e-50"], None), (["-1e39"], None), (["1e38"], "float"), (["0.0"], "float")):
     eq(names.number_kind(vals), kind, "number_kind %s" % vals)
 
 if FAIL:

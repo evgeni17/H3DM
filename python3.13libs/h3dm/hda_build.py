@@ -57,22 +57,42 @@ def _import_ptg():
     g.append(hou.ButtonParmTemplate("reload", "Reload", script_callback="import h3dm.sop_import as m; m.clear_cache(kwargs)",
                                     script_callback_language=PY, join_with_next=True))
     g.append(hou.ButtonParmTemplate("info", "File Info", script_callback="import h3dm.sop_import as m; m.info_text(kwargs)",
-                                    script_callback_language=PY))
+                                    script_callback_language=PY, join_with_next=True))
+    g.append(hou.ButtonParmTemplate("prepare", "Prepare in Rhino",
+                                    script_callback="import h3dm.prepare_ui as m; m.prepare_node(kwargs)",
+                                    script_callback_language=PY,
+                                    help="Send the file to a running Rhino 8: it creates render meshes, exact trim "
+                                         "data and NURBS from SubD and saves <name>_h3dm_v###.3dm next to the source. "
+                                         "When done, 3dm File switches to that copy. Press again to cancel waiting. "
+                                         "Settings: Prepare tab."))
+    g.append(_menu("geomode", "Geometry Mode", [
+        ("mesh_curves", "Mesh + NURBS Curves"), ("nurbs_surfaces", "NURBS Surfaces + Mesh Solids"),
+        ("all_nurbs", "All NURBS"), ("legacy", "Legacy (0.2 Surface Output)")], default=3,
+        help="Mesh + NURBS Curves: surfaces and solids as meshes, curves as exact NURBS. "
+             "NURBS Surfaces + Mesh Solids: open surfaces as NURBS, closed solids as meshes. "
+             "All NURBS: everything that has a NURBS form. Trimmed faces are exact trimmed NURBS when the file was "
+             "prepared in Rhino (Prepare in Rhino), otherwise untrimmed NURBS + boundary curves with a warning. "
+             "Legacy keeps the 0.2 behaviour of existing scenes; new nodes start with Mesh + NURBS Curves."))
+    g.append(_toggle("pack", "Pack per Object", False, help="Each Rhino object becomes one packed primitive, "
+                     "its contents follow the Geometry Mode.", conditionals={HIDE: "{ geomode == legacy }"}))
     g.append(_menu("surfout", "Surface Output", [("nurbs", "NURBS Patches"), ("polys", "Polygons"), ("packed", "Packed per Object")],
-                   help="How Breps, extrusions and surfaces are imported."))
+                   help="Legacy: how Breps, extrusions and surfaces are imported.",
+                   conditionals={HIDE: "{ geomode != legacy }"}))
     g.append(_toggle("trimnurbs", "Trimmed Faces as Untrimmed NURBS + Boundary Curves", False,
-                     help="Off: trimmed faces are tessellated (exact shape). On: the full untrimmed surface is kept and "
-                          "the face boundary is added as curves (group rhino_trim_curves).",
-                     conditionals={HIDE: "{ surfout != nurbs }"}))
+                     help="Legacy: off = trimmed faces use the render mesh; on = untrimmed surface + boundary curves.",
+                     conditionals={HIDE: "{ geomode != legacy } { surfout != nurbs }"}))
 
     geo = [
         _toggle("rendermesh", "Use Rhino Render Meshes", True,
                 help="Use the render meshes saved in the file (they match Rhino exactly). Untrimmed faces without "
-                     "one are converted by Houdini; trimmed faces without one are skipped with a warning until "
-                     "H3DM 0.3 (own tessellation)."),
+                     "one are converted by Houdini; trimmed faces without one are skipped with a warning — "
+                     "use Prepare in Rhino to create the meshes."),
         _toggle("weld", "Weld Faces of One Object", True, help="Faces of one Brep share points along their edges."),
         hou.SeparatorParmTemplate("sep_geo1"),
         _menu("curves", "Curves", [("nurbs", "NURBS Curves (exact)"), ("poly", "Polylines")]),
+        hou.FloatParmTemplate("trimtol", "Trim Curve Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=10.0,
+                              help="Rational trim curves (arcs) become polylines in Houdini (Houdini ignores trim curve "
+                                   "weights): maximum deviation. 0 = 0.1 mm in model units."),
         hou.FloatParmTemplate("curvetol", "Curve Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=100.0,
                               conditionals={HIDE: "{ curves == nurbs }"},
                               help="Maximum distance between a curve and its polyline. 0 = 1 mm in model units."),
@@ -107,6 +127,45 @@ def _import_ptg():
             "is judged by its own layer).",)),
     ]
     g.append(_folder("filter_f", "Filter", flt))
+
+    prep = [
+        _menu("prepmesh", "Mesh Preset", [("normal", "Document Mesh Settings"), ("coarse", "Coarse (Fast Render Mesh)"),
+                                          ("fine", "Fine (Quality Render Mesh)")],
+              help="Document Mesh Settings = Rhino Document Properties > Mesh of the source file."),
+        hou.FloatParmTemplate("preptol", "Mesh Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=10.0,
+                              help="Maximum distance between mesh and surface. 0 = preset value."),
+        hou.FloatParmTemplate("prepangle", "Max Angle (degrees)", 1, default_value=(0.0,), min=0.0, max=90.0,
+                              help="0 = preset value."),
+        hou.FloatParmTemplate("prepedge", "Max Edge Length (model units)", 1, default_value=(0.0,), min=0.0, max=1000.0,
+                              help="0 = preset value (no limit)."),
+        _toggle("prepforce", "Always Create New Version", False,
+                help="Off: an existing copy prepared from the same file with the same settings is reused."),
+        hou.FloatParmTemplate("preptimeout", "Timeout (seconds)", 1, default_value=(900.0,), min=10.0, max=7200.0,
+                              help="Stop waiting after this time. Rhino itself is not interrupted."),
+        hou.LabelParmTemplate("prep_note", "Note", column_labels=(
+            "Needs Rhino 8 running (Mac or Windows). If several are running you are asked which one to use. "
+            "Rhino's open document is not touched: the file is opened headless.",)),
+    ]
+
+    cache = [
+        _toggle("diskcache", "Disk Cache", True,
+                help="Store the cooked Geometry and Info outputs on disk. The key covers the file (path, size, "
+                     "modification time), every parameter, the global transform (Xform input included) and the "
+                     "H3DM/Houdini versions, so a changed file or parameter cooks again. Reload skips the cache once."),
+        hou.StringParmTemplate("cachedir", "Cache Folder", 1, default_value=("",),
+                               string_type=hou.stringParmType.FileReference, file_type=hou.fileType.Directory,
+                               conditionals={DISABLE: "{ diskcache == 0 }"},
+                               help="Empty = $HOUDINI_TEMP_DIR/h3dm_cache (or $H3DM_CACHE)."),
+        hou.FloatParmTemplate("cachelimit", "Size Limit (MB)", 1, default_value=(4096.0,), min=100.0, max=100000.0,
+                              conditionals={DISABLE: "{ diskcache == 0 }"},
+                              help="When the folder grows larger, the least recently used entries are removed."),
+        hou.FloatParmTemplate("cachemin", "Cache Cooks Longer Than (s)", 1, default_value=(0.5,), min=0.0, max=60.0,
+                              conditionals={DISABLE: "{ diskcache == 0 }"},
+                              help="Fast cooks are not stored."),
+        hou.ButtonParmTemplate("cacheclear", "Clear Disk Cache",
+                               script_callback="import h3dm.sop_import as m; m.clear_disk_cache(kwargs)",
+                               script_callback_language=PY),
+    ]
 
     nm = [
         _menu("nonlatin", "Non-Latin Names", [("keep", "Keep"), ("translit", "Transliterate"),
@@ -172,6 +231,8 @@ def _import_ptg():
                               help="Rhino coordinates (model units) that become the Houdini origin."),
     ]
     g.append(_folder("xform_f", "Global Transform", gt))
+    g.append(_folder("prep_f", "Prepare", prep))
+    g.append(_folder("cache_f", "Cache", cache))
     return g
 
 
@@ -274,7 +335,8 @@ soptoolutils.genericTool(kwargs, '$HDA_NAME')]]></script>
 """
 
 
-def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_text, outputs=1, output_labels=None):
+def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_text, outputs=1, output_labels=None,
+            on_created=None):
     if os.path.exists(hda_path):
         for existing in hou.hda.definitionsInFile(hda_path):
             if existing.nodeTypeName() == type_name:
@@ -298,6 +360,9 @@ def _finish(node, type_name, label, hda_path, ptg, min_in, max_in, icon, help_te
             except Exception:
                 pass
     d.addSection("Tools.shelf", _tool_xml())
+    if on_created:
+        d.addSection("OnCreated", on_created)
+        d.setExtraFileOption("OnCreated/IsPython", True)
     d.addSection("Help", help_text)
     d.save(hda_path, hda)
     return hda
@@ -320,7 +385,9 @@ def build_import(otls=None):
     nodes[0].setDisplayFlag(True)
     path = os.path.join(otls or OTLS, "h3dm_3dm_import.hda")
     _finish(sub, IMPORT_TYPE, "H3DM 3dm Import", path, _import_ptg(), 0, 1, "SOP_file", HELP_IMPORT,
-            outputs=3, output_labels=("Geometry", "Info", "Xform"))
+            outputs=3, output_labels=("Geometry", "Info", "Xform"),
+            on_created="# новые ноды: режим по умолчанию (старые сцены сохраняют Legacy)\n"
+                       "kwargs['node'].parm('geomode').set('mesh_curves')\n")
     return path
 
 

@@ -34,6 +34,7 @@ def run():
     tmp = hou.node("/obj").createNode("geo", "__h3dm_regression")
     try:
         n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("geomode").set("legacy")      # проверки 0.2: поведение старых сцен
         n.parm("file").set(os.path.join(FX, "h3dm_fixture_v001.3dm"))
         for mode in ("nurbs", "polys", "packed"):
             n.parm("surfout").set(mode)
@@ -78,6 +79,7 @@ def run():
         n.parm("xformmode").set("manual")
         n.parmTuple("manualorigin").set((1000.0, 2000.0, 0.0))
         n2 = tmp.createNode("h3dm::3dm_import", "imp2")
+        n2.parm("geomode").set("legacy")
         n2.parm("file").set(os.path.join(FX, "h3dm_fixture_v001.3dm"))
         n2.setInput(0, n, 2)
         d2 = n2.geometry(0).dictAttribValue("h3dm_xform")
@@ -120,6 +122,7 @@ def run_edgecases():
     tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_edge")
     try:
         n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("geomode").set("legacy")
         n.parm("file").set(path)
         n.parm("nonlatin").set("translit_keep")
         n.parm("surfout").set("nurbs")
@@ -280,4 +283,267 @@ def _id_of(f, name):
     return ""
 
 
-result = run() + run_edgecases()
+# ---------------------------------------------------------------- 0.3: режимы, точная обрезка, группы типов, Xform
+
+def _check_type_groups(g, label, fails):
+    """Каждый примитив ровно в одной группе h3dm_type_*, счётчики = статистика типов."""
+    import collections
+    names = {"Poly": "h3dm_type_polygon", "NURBCurve": "h3dm_type_nurbs_curve", "NURBMesh": "h3dm_type_nurbs_surface",
+             "PackedGeometry": "h3dm_type_packed_geometry"}
+    stat = collections.Counter(names.get(p.intrinsicValue("typename"), "h3dm_type_other") for p in g.prims())
+    member = collections.Counter()
+    for grp in g.primGroups():
+        if grp.name().startswith("h3dm_type_"):
+            got = len(grp.prims())
+            if got != stat.get(grp.name(), 0):
+                fails.append("%s: group %s has %d, type count %d" % (label, grp.name(), got, stat.get(grp.name(), 0)))
+            for p in grp.prims():
+                member[p.number()] += 1
+    if any(v != 1 for v in member.values()) or len(member) != len(g.prims()):
+        fails.append("%s: primitives not in exactly one h3dm_type_ group (%d of %d)" % (label, len(member), len(g.prims())))
+
+
+def run_v03():
+    import collections
+    from h3dm import rhino_read as rr
+    fails = []
+    prepared = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+    small = os.path.join(FX, "h3dm_fixture_small_v001.3dm")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_v03")
+    try:
+        n = tmp.createNode("h3dm::3dm_import", "imp")
+        if n.parm("geomode").evalAsString() != "mesh_curves":
+            fails.append("new node mode: %s" % n.parm("geomode").evalAsString())
+        n.parm("file").set(prepared)
+        expect = {"mesh_curves": (0, None), "nurbs_surfaces": (2, 2), "all_nurbs": (24, 7)}
+        for mode, (nsurf, exact) in expect.items():
+            n.parm("geomode").set(mode)
+            for pack in (0, 1):
+                n.parm("pack").set(pack)
+                n.cook(force=True)
+                if n.node("GEO").errors():
+                    fails.append("%s pack=%d: %s" % (mode, pack, n.node("GEO").errors()))
+                    continue
+                g = n.geometry(0)
+                _check_type_groups(g, "%s pack=%d" % (mode, pack), fails)
+                if pack:
+                    if any(p.intrinsicValue("typename") != "PackedGeometry" for p in g.prims()):
+                        fails.append("%s pack=1: non-packed primitives on top level" % mode)
+                    continue
+                kinds = collections.Counter(p.intrinsicValue("typename") for p in g.prims())
+                if kinds.get("NURBMesh", 0) != nsurf:
+                    fails.append("%s: NURBS surfaces %d, expected %d" % (mode, kinds.get("NURBMesh", 0), nsurf))
+                grp = g.findPrimGroup("rhino_trimmed_exact")
+                if exact is not None and (grp is None or len(grp.prims()) != exact):
+                    fails.append("%s: exact trimmed %s, expected %d" % (mode, len(grp.prims()) if grp else 0, exact))
+                if mode == "mesh_curves" and kinds.get("NURBCurve", 0) != 5:
+                    fails.append("mesh_curves: NURBS curves %d (lines/polylines must be NURBS too)" % kinds.get("NURBCurve", 0))
+        n.parm("pack").set(0)
+        # точность обрезки: площадь каждой точной грани против площади Rhino из подготовки
+        n.parm("geomode").set("all_nurbs")
+        g = n.geometry(0)
+        f = rr.read(prepared)
+        areas = {}
+        for o in f.Objects:
+            if type(o.Geometry).__name__ == "Brep":
+                for fi, fd in (rr.brep_trims(o.Geometry) or {}).items():
+                    areas[(str(o.Attributes.Id), fi)] = fd["a"]
+        verb = hou.sopNodeTypeCategory().nodeVerb("convert")
+        verb.setParms({"totype": 0, "lodu": 20.0, "lodv": 20.0, "lodtrim": 20.0})
+        unit = g.attribValue("rhino_unit_m")
+        for p in g.findPrimGroup("rhino_trimmed_exact").prims():
+            sub = hou.Geometry()
+            sub.merge(g)
+            sub.deletePrims([q for q in sub.prims() if q.number() != p.number()])
+            out = hou.Geometry()
+            verb.execute(out, [sub])
+            a = sum(q.intrinsicValue("measuredarea") for q in out.prims()) / (unit * unit)
+            ra = areas.get((p.attribValue("rhino_id"), p.attribValue("rhino_face")))
+            if not ra or abs(a - ra) / ra > 0.002:
+                fails.append("trimmed area %s f%d: %s vs Rhino %s" % (p.attribValue("name"), p.attribValue("rhino_face"), a, ra))
+        # без подготовки: обрезанные грани — необрезанные NURBS + кривые границ с предупреждением
+        n.parm("file").set(small)
+        n.cook(force=True)
+        if not any("Prepare in Rhino" in w for w in n.node("GEO").warnings()):
+            fails.append("unprepared all_nurbs: no Prepare in Rhino warning")
+        if not n.geometry(0).findPrimGroup("rhino_trimmed_surfaces"):
+            fails.append("unprepared all_nurbs: no rhino_trimmed_surfaces group")
+        # строгий вход Xform: подключена посторонняя геометрия -> ошибка
+        box = tmp.createNode("box", "not_xform")
+        n.setInput(0, box)
+        try:
+            n.cook(force=True)
+        except hou.OperationFailed:
+            pass
+        if not n.node("GEO").errors() or "Xform input" not in " ".join(n.node("GEO").errors()):
+            fails.append("strict xform: no error for a wrong input")
+        # нулевой входной сдвиг обязателен; масштаб/оси — со входа
+        src = tmp.createNode("h3dm::3dm_import", "src")
+        src.parm("file").set(small)
+        src.parm("xformmode").set("none")
+        src.parm("scale").set(1000.0)
+        n.setInput(0, src, 2)
+        n.parm("xformmode").set("auto")
+        g = n.geometry(0)
+        d = g.dictAttribValue("h3dm_xform")
+        if d.get("origin_text", "").split() != ["0.000000000"] * 3 or abs(d.get("scale", 0) - 1000.0) > 1e-9:
+            fails.append("xform input: %s" % d)
+        if not any("Xform input" in w for w in n.node("GEO").warnings()):
+            fails.append("xform input: no warning about inherited scale")
+    finally:
+        tmp.destroy()
+    print("houdini_regression 0.3: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+def run_prepare():
+    """Prepare in Rhino: нужен запущенный Rhino 8 (иначе пропуск). Путь с пробелами и кириллицей."""
+    import shutil
+    import tempfile
+    from h3dm import rhino_bridge as rb, prepare_ui as pu, rhino_read as rr
+    fails = []
+    inst = rb.list_instances()
+    if not inst:
+        print("houdini_regression prepare: SKIPPED (no running Rhino 8)")
+        return fails
+    d = os.path.join(tempfile.mkdtemp(prefix="h3dm_prep_"), "папка с пробелом")
+    os.makedirs(d)
+    src = os.path.join(d, "малый файл.3dm")
+    shutil.copy(os.path.join(FX, "h3dm_fixture_small_v001.3dm"), src)
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_prep")
+    try:
+        r = rb.wait(rb.submit(src, {"preset": "coarse"}, inst[0]["id"]), 120)
+        out = r.get("output") or ""
+        if r.get("status") != "ok" or not out.endswith("малый файл_h3dm_v001.3dm"):
+            fails.append("prepare: %s" % {k: r.get(k) for k in ("status", "output", "error")})
+        else:
+            st = r.get("stats", {})
+            if st.get("check_faces_meshed") != st.get("check_faces") or not st.get("check_faces"):
+                fails.append("prepare: faces without mesh %s" % st)
+            if rr.prepare_source(out) != src:
+                fails.append("prepare: stamp source %s" % rr.prepare_source(out))
+            # повтор с исходником и теми же настройками -> skipped
+            r2 = rb.wait(rb.submit(src, {"preset": "coarse"}, inst[0]["id"]), 60)
+            if r2.get("status") != "skipped" or r2.get("output") != out:
+                fails.append("prepare repeat: %s" % r2.get("status"))
+            # нода: штамп в detail, все грани обрезаны точно, без предупреждений
+            n = tmp.createNode("h3dm::3dm_import", "imp")
+            n.parm("file").set(out)
+            n.parm("geomode").set("all_nurbs")
+            g = n.geometry(0)
+            warn = [w for w in n.node("GEO").warnings() if "Rhino meshes stay meshes" not in w]
+            if warn or n.node("GEO").errors():
+                fails.append("prepared all_nurbs: %s %s" % (n.node("GEO").warnings(), n.node("GEO").errors()))
+            if g.findGlobalAttrib("h3dm_prepare") is None:
+                fails.append("prepared: no h3dm_prepare detail attribute")
+            if "h3dm.prepare" in g.dictAttribValue("rhino_doc_text"):
+                fails.append("prepared: stamp leaked into rhino_doc_text")
+            if "Prepared in Rhino" not in rr.file_info(out):
+                fails.append("prepared: File Info has no stamp")
+            # синхронный путь ноды (как в hython): поздний/изменённый файл не трогается
+            n.parm("file").set(src)
+            res = pu.start(src, {"preset": "coarse"}, inst[0]["id"], node=None) if not hou.isUIAvailable() else None
+            if res is not None and res.get("status") != "skipped":
+                fails.append("prepare_ui sync: %s" % res.get("status"))
+        bad = os.path.join(d, "битый.3dm")
+        with open(bad, "wb") as fh:
+            fh.write(b"not a 3dm" * 50)
+        try:
+            rb.submit(bad, {}, inst[0]["id"])
+            fails.append("prepare: non-3dm file accepted")
+        except rb.BridgeError:
+            pass
+        try:
+            rb.submit(src, {}, "rhinocode_remotepipe_0")
+            fails.append("prepare: unknown Rhino id accepted")
+        except rb.BridgeError:
+            pass
+    finally:
+        tmp.destroy()
+        shutil.rmtree(os.path.dirname(d), ignore_errors=True)
+    print("houdini_regression prepare: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+def run_cache():
+    """Дисковый кэш: попадание, инвалидирование по параметру, файлу и входу Xform, Reload, предупреждения."""
+    import shutil
+    import tempfile
+    import time
+    from h3dm import geocache, sop_import as si
+    fails = []
+    cdir = tempfile.mkdtemp(prefix="h3dm_cache_")
+    work = tempfile.mkdtemp(prefix="h3dm_cfile_")
+    src = os.path.join(work, "файл с пробелом.3dm")
+    shutil.copy(os.path.join(FX, "h3dm_fixture_small_v001.3dm"), src)
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_cache")
+    try:
+        n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("file").set(src)
+        n.parm("geomode").set("all_nurbs")
+        n.parm("cachedir").set(cdir)
+        n.parm("cachemin").set(0.0)
+        geo = n.node("GEO")
+
+        def entries():
+            return geocache.stats(cdir)[1]
+
+        def cook():
+            geo.cook(force=True)
+            return n.geometry().intrinsicValue("primitivecount"), geo.warnings()
+        c1 = cook()
+        if entries() != 1 or not c1[1]:
+            fails.append("cache: first cook entries=%d warnings=%s" % (entries(), c1[1]))
+        # попадание: файл не читается (кэш rhino3dm в памяти очищен, сам файл временно недоступен для чтения)
+        si._CACHE.clear()
+        orig = si.open_file
+        si.open_file = lambda path: (_ for _ in ()).throw(RuntimeError("file read on a cache hit"))
+        try:
+            c2 = cook()
+        finally:
+            si.open_file = orig
+        if c2 != c1 or entries() != 1:
+            fails.append("cache hit: %s vs %s, entries %d" % (c2, c1, entries()))
+        # параметр -> новый ключ
+        n.parm("trimtol").set(0.5)
+        cook()
+        if entries() != 2:
+            fails.append("cache: parameter change entries=%d" % entries())
+        # файл изменён (время) -> новый ключ
+        st = os.stat(src)
+        os.utime(src, (st.st_atime, st.st_mtime + 10))
+        cook()
+        if entries() != 3:
+            fails.append("cache: file change entries=%d" % entries())
+        # вход Xform -> новый ключ
+        x = tmp.createNode("h3dm::3dm_import", "x")
+        x.parm("file").set(src)
+        x.parm("xformmode").set("manual")
+        x.parmTuple("manualorigin").set((1000.0, 0.0, 0.0))
+        n.setInput(0, x, 2)
+        cook()
+        if entries() < 4:
+            fails.append("cache: xform input entries=%d" % entries())
+        # Reload: следующая готовка мимо кэша (файл читается)
+        n.setInput(0, None)
+        calls = []
+        si.open_file = lambda path, _o=orig: (calls.append(path), _o(path))[1]
+        try:
+            si.clear_cache({"node": n})
+        finally:
+            si.open_file = orig
+        if not calls:
+            fails.append("cache: Reload did not re-read the file")
+        # Clear Disk Cache
+        si.clear_disk_cache({"node": n})
+        if entries() != 0:
+            fails.append("cache: clear left %d entries" % entries())
+    finally:
+        tmp.destroy()
+        shutil.rmtree(cdir, ignore_errors=True)
+        shutil.rmtree(work, ignore_errors=True)
+    print("houdini_regression cache: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+result = run() + run_edgecases() + run_v03() + run_prepare() + run_cache()

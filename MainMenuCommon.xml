@@ -13,6 +13,15 @@
         <scriptCode><![CDATA[import h3dm.tools as t; t.export_selected(kwargs)]]></scriptCode>
       </scriptItem>
       <separatorItem/>
+      <scriptItem id="h3dm_prepare">
+        <label>Prepare in Rhino...</label>
+        <scriptCode><![CDATA[import h3dm.prepare_ui as m; m.prepare_file_menu(kwargs)]]></scriptCode>
+      </scriptItem>
+      <scriptItem id="h3dm_rhino_folder">
+        <label>Open Rhino Tools Folder</label>
+        <scriptCode><![CDATA[import h3dm.prepare_ui as m; m.open_rhino_folder(kwargs)]]></scriptCode>
+      </scriptItem>
+      <separatorItem/>
       <scriptItem id="h3dm_template">
         <label>Create Attribute Template</label>
         <scriptCode><![CDATA[import h3dm.tools as t; t.attribute_template(kwargs)]]></scriptCode>
