@@ -116,6 +116,7 @@ def submit(source, settings=None, rhino_id=None):
     if rhino_id and rhino_id not in [i["id"] for i in inst]:
         raise BridgeError("Rhino instance %s is not running any more." % rhino_id)
     rid = rhino_id or inst[0]["id"]
+    rpid = next((i["pid"] for i in inst if i["id"] == rid), None)
     jid = uuid.uuid4().hex[:12]
     d = jobs_dir()
     job = os.path.join(d, "job_%s.json" % jid)
@@ -131,6 +132,7 @@ def submit(source, settings=None, rhino_id=None):
     proc = subprocess.Popen(cli_command() + ["--rhino", rid, "script", runner], stdout=log, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL)
     state = {"id": jid, "job": job, "result": job + ".result.json", "started": time.time(), "rhino": rid,
+             "rhino_pid": rpid, "progress": job + ".progress.json",
              "source": os.path.abspath(source), "cancelled": False, "proc": proc, "log": log}
     _JOBS[jid] = state
     return state
@@ -162,6 +164,11 @@ def poll(state):
     if state.get("cancelled"):
         return {"status": "cancelled", "id": state["id"]}
     p = state["result"]
+    if not os.path.exists(p) and not _alive(state.get("rhino_pid")):
+        time.sleep(0.2)
+        if not os.path.exists(p):
+            return {"status": "error", "id": state["id"],
+                    "error": "Rhino (pid %s) was closed before it finished the job." % state.get("rhino_pid")}
     if not os.path.exists(p):
         # CLI мог упасть сразу (Rhino закрыт, сервер скриптов не отвечает); ждём ещё немного результата
         fail = _cli_failure(state)
@@ -178,6 +185,31 @@ def poll(state):
     if res.get("id") not in (None, state["id"]):
         return {"status": "error", "error": "result belongs to another job", "id": state["id"]}
     return res
+
+
+def _alive(pid):
+    if not pid:
+        return True
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except Exception:
+        return True
+
+
+def progress(state):
+    """Последний ход работы из Rhino: {'stage', 'i', 'n'} или None."""
+    try:
+        with open(state["progress"], encoding="utf-8") as fh:
+            return json.load(fh)
+    except Exception:
+        return None
+
+
+STAGES = {"hash": "checking the source", "open": "opening the file", "convert": "converting objects",
+          "blocks": "converting blocks", "mesh": "meshing", "write": "writing the copy", "check": "checking the copy"}
 
 
 def cancel(state):

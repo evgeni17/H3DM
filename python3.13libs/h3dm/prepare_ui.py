@@ -155,8 +155,12 @@ def _make_callback(jid):
             n = int(time.time() - state["started"])
             if n != state.get("_shown"):
                 state["_shown"] = n
-                _status("Rhino is preparing %s ... %d s (press Prepare in Rhino again to cancel)"
-                        % (os.path.basename(state["source"]), n))
+                pr = rhino_bridge.progress(state) or {}
+                stage = rhino_bridge.STAGES.get(pr.get("stage"), "waiting for Rhino")
+                if pr.get("n"):
+                    stage += " %d/%d" % (pr.get("i", 0) + 1, pr["n"])
+                _status("Rhino: %s — %s, %d:%02d (press Prepare in Rhino again to stop waiting)"
+                        % (os.path.basename(state["source"]), stage, n // 60, n % 60))
             return
         _finish(jid, res)
     return cb
@@ -200,7 +204,9 @@ def prepare_node(kwargs):
     jid = node.cachedUserData(_KEY)
     if jid and jid in _ACTIVE:
         if hou.isUIAvailable() and hou.ui.displayMessage(
-                "Rhino is still preparing this node's file. Stop waiting?", buttons=("Stop Waiting", "Keep Waiting"),
+                "Rhino is still preparing this node's file.\n\nStop waiting? Rhino itself keeps working and still "
+                "writes the copy; press Prepare in Rhino again later to pick it up (it is reused, not rebuilt).",
+                buttons=("Stop Waiting", "Keep Waiting"),
                 default_choice=1, close_choice=1, title="H3DM: Prepare in Rhino") == 0:
             cancel_node(node)
         return

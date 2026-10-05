@@ -76,8 +76,11 @@ def _curve_data(c):
     return {"o": n.Order, "k": [n.Knots[i] for i in range(n.Knots.Count)], "p": pts, "r": bool(n.IsRational)}
 
 
-def trims_data(brep):
-    """Петли кривых обрезки всех граней (Brep уже V2: все грани — NurbsSurface)."""
+def trims_data(brep, areas=False):
+    """Петли кривых обрезки всех граней (Brep уже V2: все грани — NurbsSurface).
+
+    areas=True добавляет площадь каждой грани (AreaMassProperties) — только для проверок: на сложных
+    моделях это почти всё время подготовки (3873 грани: 507 с из 527)."""
     faces = []
     for fi in range(brep.Faces.Count):
         fc = brep.Faces[fi]
@@ -86,18 +89,19 @@ def trims_data(brep):
             loops.append({"t": str(lp.LoopType).split(".")[-1],
                           "c": [_curve_data(tr.TrimCurve) for tr in lp.Trims]})
         area = None
-        try:
-            amp = G.AreaMassProperties.Compute(fc.DuplicateFace(False))
-            area = amp.Area if amp is not None else None
-        except Exception:
-            pass
+        if areas:
+            try:
+                amp = G.AreaMassProperties.Compute(fc.DuplicateFace(False))
+                area = amp.Area if amp is not None else None
+            except Exception:
+                pass
         faces.append({"f": fi, "a": area, "l": loops,
                       "d": [fc.Domain(0).T0, fc.Domain(0).T1, fc.Domain(1).T0, fc.Domain(1).T1]})
     raw = json.dumps({"v": PREP_VERSION, "faces": faces}, separators=(",", ":")).encode("utf-8")
     return base64.b64encode(zlib.compress(raw, 6)).decode("ascii")
 
 
-def convert_geometry(g, stats):
+def convert_geometry(g, stats, areas=False):
     """-> (новая геометрия или None, тип исходника). Brep/Extrusion -> V2 Brep, SubD -> NURBS Brep."""
     src = type(g).__name__
     b = None
@@ -118,7 +122,7 @@ def convert_geometry(g, stats):
         return None, src
     if not b.MakeValidForV2():
         stats["v2_failed"] += 1
-    b.SetUserString("h3dm.trims", trims_data(b))
+    b.SetUserString("h3dm.trims", trims_data(b, areas))
     b.SetUserString("h3dm.source_type", src)
     stats["breps"] += 1
     stats["faces"] += b.Faces.Count
@@ -192,10 +196,17 @@ def _publish(tmp, folder, stem, num):
     raise IOError("no free version name for %s" % stem)
 
 
-def prepare(src, settings=None, log=print):
+def _no_progress(stage, i=0, n=0):
+    pass
+
+
+def prepare(src, settings=None, log=print, progress=None):
+    """progress(stage, i, n) — ход работы для Houdini (stage: hash, open, convert, blocks, mesh, write, check)."""
+    progress = progress or _no_progress
     settings = dict(settings or {})
     settings.setdefault("preset", "normal")
     t0 = time.time()
+    progress("hash")
     fp = fingerprint(src)
     rhino_ver = str(Rhino.RhinoApp.Version)
     key = {"source_sha1": fp["sha1"], "prep_version": PREP_VERSION, "rhino": rhino_ver, "settings": settings}
@@ -208,6 +219,8 @@ def prepare(src, settings=None, log=print):
 
     if not is_3dm(src):
         raise IOError("Not a Rhino .3dm file: %s" % src)
+    areas = bool(settings.get("face_areas"))      # площади граней — только для тестов
+    progress("open")
     doc = Rhino.RhinoDoc.OpenHeadless(src)
     if doc is None:
         raise IOError("Rhino could not open %s" % src)
@@ -216,20 +229,23 @@ def prepare(src, settings=None, log=print):
     try:
         mp = meshing_parameters(doc, settings)
         # 1) объекты модели
-        for o in list(doc.Objects):
+        objs_all = list(doc.Objects)
+        for k, o in enumerate(objs_all):
+            progress("convert", k, len(objs_all))
             stats["objects"] += 1
-            nb, src_type = convert_geometry(o.Geometry, stats)
+            nb, src_type = convert_geometry(o.Geometry, stats, areas)
             if nb is not None:
                 doc.Objects.Replace(o.Id, nb)
         # 2) объекты в определениях блоков
         for idx in range(doc.InstanceDefinitions.Count):
+            progress("blocks", idx, doc.InstanceDefinitions.Count)
             d = doc.InstanceDefinitions[idx]
             if d is None or d.IsDeleted:
                 continue
             objs = d.GetObjects()
             geoms, attrs, changed = [], [], False
             for o in objs:
-                nb, _ = convert_geometry(o.Geometry, stats)
+                nb, _ = convert_geometry(o.Geometry, stats, areas)
                 geoms.append(nb if nb is not None else o.Geometry)
                 attrs.append(o.Attributes)
                 changed = changed or nb is not None
@@ -242,7 +258,8 @@ def prepare(src, settings=None, log=print):
             d = doc.InstanceDefinitions[idx]
             if d is not None and not d.IsDeleted:
                 targets += list(d.GetObjects())
-        for o in targets:
+        for k, o in enumerate(targets):
+            progress("mesh", k, len(targets))
             if isinstance(o.Geometry, G.Mesh):
                 stats["meshes_kept"] += 1
                 continue
@@ -266,6 +283,7 @@ def prepare(src, settings=None, log=print):
         opt.IncludeRenderMeshes = True
         opt.WriteGeometryOnly = False
         opt.SuppressAllInput = True
+        progress("write")
         try:
             if not doc.Write3dmFile(tmp, opt):
                 raise IOError("cannot write %s (folder read-only or disk full?)" % tmp)
@@ -279,6 +297,7 @@ def prepare(src, settings=None, log=print):
     finally:
         doc.Dispose()
     # проверка копии: сетки на месте
+    progress("check")
     check = Rhino.FileIO.File3dm.Read(out)
     faces = meshed = 0
     for o in check.Objects:
@@ -291,6 +310,26 @@ def prepare(src, settings=None, log=print):
     return {"status": "ok", "output": out, "stats": stats, "elapsed": time.time() - t0, "rhino": rhino_ver}
 
 
+def _progress_writer(job_path):
+    """Ход работы в <задание>.progress.json (не чаще раза в 0,5 с) — Houdini показывает его в строке состояния."""
+    path = job_path + ".progress.json"
+    last = [0.0, None]
+
+    def write(stage, i=0, n=0):
+        now = time.time()
+        if stage == last[1] and now - last[0] < 0.5:
+            return
+        last[0], last[1] = now, stage
+        try:
+            tmp = path + ".tmp"
+            with open(tmp, "w") as fh:
+                json.dump({"stage": stage, "i": i, "n": n, "pid": os.getpid(), "time": now}, fh)
+            os.replace(tmp, path)
+        except Exception:
+            pass
+    return write
+
+
 def run_job(job_path):
     """Задание от Houdini: {"id", "source", "settings"} -> <задание>.result.json."""
     res_path = job_path + ".result.json"
@@ -300,7 +339,7 @@ def run_job(job_path):
             job = json.load(fh)
         result["id"] = job.get("id")
         result["source"] = job.get("source")
-        result.update(prepare(job["source"], job.get("settings")))
+        result.update(prepare(job["source"], job.get("settings"), progress=_progress_writer(job_path)))
     except Exception:
         result["error"] = traceback.format_exc()
     tmp = res_path + ".tmp"

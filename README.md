@@ -4,7 +4,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
 *Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for exact trimmed NURBS.
 
-> **Status: 0.3.0 — import works, export is in development.** Geometry modes (meshes, NURBS, exact trimmed NURBS),
+> **Status: 0.3.1 — import works, export is in development.** Geometry modes (meshes, NURBS, exact trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 

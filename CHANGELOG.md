@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.3.1 — 2026-10-05
+Prepare in Rhino on a real model (123 MB, 114 Breps, 3873 faces) took 9 minutes and looked frozen.
+* **35× faster preparation:** the face areas (`AreaMassProperties`, used only by the tests) took 507 of 527 s.
+  They are off now (`"face_areas": true` in the job settings turns them on). The same model: 527 s → 18 s.
+* **Progress:** Rhino writes `<job>.progress.json`; the status bar shows the stage and counter
+  (`converting objects 57/114`, `meshing`, `writing the copy`) and the elapsed time.
+* **Rhino closed while working:** detected at once (the job used to wait for the full timeout).
+* *Stop Waiting* explains that Rhino keeps working and the finished copy is picked up by the next press.
+
 ## 0.3.0 — 2026-10-05
 Requirements from the 0.2.1 review: geometry modes, exact trimmed NURBS, preparation in Rhino, strict Xform input,
 disk cache and speed.
