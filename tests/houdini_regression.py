@@ -790,8 +790,9 @@ def run_export():
             fails.append("export edge cases: %s" % [(k[:8], f, a, b) for k, f, a, b in c["diffs"]][:4])
         src3 = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
         imp.parm("file").set(src3)
-        text, path = export("prepared.3dm", passthrough=0)      # путь без исходного файла (Houdini-геометрия)
+        text, path = export("prepared.3dm", passthrough=0, trimmed="mesh")   # без исходника и без Rhino
         ex.parm("passthrough").set(1)
+        ex.parm("trimmed").set("rhino")
         dev = rt_compare.shape_deviation(src3, path)
         if dev["surfaces"] > 1e-3 or dev["n_surfaces"] < 15 or "trimmed_plane 2" not in text \
                 or "5 trimmed NURBS faces of changed objects written as meshes" not in text:
@@ -1199,6 +1200,131 @@ def run_export_changes():
     return fails
 
 
+def run_export_rhino():
+    """0.4: изменённые объекты с обрезанными гранями пересобираются в запущенном Rhino 8 (иначе пропуск):
+    точные Brep с отверстиями, объединённые тела; без Rhino — плоскости и сетки с предупреждением."""
+    import shutil
+    import tempfile
+    import numpy as np
+    from h3dm import sop_export as se, rhino_read as rr, rhino_bridge as rb
+    fails = []
+    if not rb.list_instances():
+        print("houdini_regression export rhino: SKIPPED (no running Rhino 8)")
+        return fails
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_rh_")
+    src = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+    S = {str(o.Attributes.Id): o for o in rr.read(src).Objects}
+    ids = {o.Attributes.Name: k for k, o in S.items() if not o.Attributes.IsInstanceDefinitionObject}
+    col, rnd, holed, dome = ids["Колонна_вырез"], ids["Колонна_круглая"], ids["Панель с отверстием"], ids["Купол"]
+
+    def topo(g):
+        k = rr.enum_name(g.ObjectType)
+        if k == "Extrusion":
+            g = g.ToBrep(True)
+        elif k != "Brep":
+            return None
+        return (len(g.Faces), len(g.Edges), sum(len(g.Faces[i].Loops) for i in range(len(g.Faces))), bool(g.IsSolid))
+
+    def box(g):
+        b = g.GetBoundingBox()
+        return np.array([b.Min.X, b.Min.Y, b.Min.Z, b.Max.X, b.Max.Y, b.Max.Z])
+
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_rh")
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(src)
+        imp.parm("geomode").set("all_nurbs")
+        st = tmp.createNode("stash", "edited")
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, st)
+        ex.setInput(1, imp, 2)
+        ex.parm("packed").set("explode")
+        ex.parm("trimmed").set("rhino")
+        base = imp.geometry().freeze()
+
+        def export(geo, name, **parms):
+            for k, v in parms.items():
+                ex.parm(k).set(v)
+            st.parm("stash").set(geo)
+            ex.parm("file").set(os.path.join(out_dir, name))
+            text, path = se.run(ex, write=True)
+            return text, {str(o.Attributes.Id): o for o in rr.read(path).Objects}
+
+        # 1) все объекты из Houdini (без исходника): пересборка = исходник (топология, тела, габарит)
+        text, B = export(base, "all.3dm", passthrough=0)
+        for k in (col, rnd, holed, dome):
+            if k not in B or topo(B[k].Geometry) != topo(S[k].Geometry) or \
+                    float(np.abs(box(B[k].Geometry) - box(S[k].Geometry)).max()) > 1e-6:
+                fails.append("rhino rebuild %s: %s vs %s" % (S[k].Attributes.Name, topo(B[k].Geometry) if k in B else None,
+                                                             topo(S[k].Geometry)))
+        if "rebuilt in Rhino (exact Breps): 4" not in text or "as meshes" in text:
+            fails.append("rhino rebuild report: %s" % text[-300:])
+        if any(str(kv[0]).startswith("h3dm.") for o in B.values() for kv in (o.Geometry.GetUserStrings() or ())):
+            fails.append("rhino rebuild: h3dm.* user strings written")
+        # 2) колонна сдвинута на 0,1 м (Houdini Y) -> пересобрана, на 100 мм выше, тело; остальные — из исходника
+        g = hou.Geometry(base)
+        moved = {v.point().number(): v.point() for p in g.prims() if p.attribValue("rhino_id") == col
+                 for v in p.vertices()}
+        for pt in moved.values():                      # каждую точку — один раз
+            pt.setPosition(pt.position() + hou.Vector3(0, 0.1, 0))
+        text, B = export(g, "moved.3dm", passthrough=1)
+        d = box(B[col].Geometry) - box(S[col].Geometry) if col in B else None
+        if d is None or topo(B[col].Geometry) != topo(S[col].Geometry) or abs(d[2] - 100.0) > 1e-6 or abs(d[5] - 100.0) > 1e-6:
+            fails.append("rhino moved column: %s %s" % (topo(B[col].Geometry) if col in B else None, d))
+        if "rebuilt in Rhino (exact Breps): 1" not in text or "from the source file (exact Breps): 5" not in text:
+            fails.append("rhino moved report: %s" % text[-300:])
+        # 3) отверстие удалено в Houdini -> пересборка по текущей обрезке Houdini: одна петля
+        tgt = {p.number() for p in base.prims() if p.attribValue("rhino_id") == holed}
+
+        def unhole(k, t, f):
+            if k in tgt and t == "NURBMesh" and f.get("profiles"):
+                prof = f["profiles"]
+                i = prof.index("trimregions")
+                prof[i + 1] = prof[i + 1][:1]
+                return True
+            return False
+        text, B = export(_edit_geo(base, unhole), "unhole.3dm", passthrough=1)
+        t = topo(B[holed].Geometry) if holed in B else None
+        if t is None or t[2] != 1 or t[0] != 1:
+            fails.append("rhino unhole: %s" % (t,))
+        # 4) деформация: одна управляющая точка большой грани купола и колонны сдвинута -> валидные Brep;
+        #    колонна больше не замыкается — несколько Brep и предупреждение
+        g = hou.Geometry(base)
+        for k in (dome, col):
+            prims = [p for p in g.prims() if p.attribValue("rhino_id") == k and p.type() == hou.primType.NURBSSurface]
+            pr = max(prims, key=lambda p: p.intrinsicValue("nu") * p.intrinsicValue("nv"))
+            pt = pr.vertex(pr.intrinsicValue("nu") // 2, pr.intrinsicValue("nv") // 2).point()
+            pt.setPosition(pt.position() + hou.Vector3(0.05, 0.02, 0))
+        text, B = export(g, "deform.3dm", passthrough=1)
+        f = rr.read(os.path.join(out_dir, "deform.3dm"))
+        mine = [o.Geometry for o in f.Objects if rr.enum_name(o.Geometry.ObjectType) == "Brep"]
+        td = topo(B[dome].Geometry) if dome in B else None
+        if not all(b.IsValid for b in mine) or td is None or td[0] != 1 or td[2] != 1:
+            fails.append("rhino deform: dome %s" % (td,))
+        ncol = sum(1 for o in f.Objects if rr.enum_name(o.Geometry.ObjectType) == "Brep"
+                   and o.Attributes.Name == S[col].Attributes.Name)
+        nfaces = sum(len(o.Geometry.Faces) for o in f.Objects if rr.enum_name(o.Geometry.ObjectType) == "Brep"
+                     and o.Attributes.Name == S[col].Attributes.Name)
+        if nfaces != len(S[col].Geometry.Faces) or (ncol > 1) != ("did not join into one Brep" in text):
+            fails.append("rhino deform: column %d Breps, %d faces, warning %s" % (
+                ncol, nfaces, "did not join into one Brep" in text))
+        # 5) Rhino недоступен -> плоскости и сетки с предупреждением
+        orig = rb.list_instances
+        rb.list_instances = lambda: []
+        try:
+            text, B = export(base, "norhino.3dm", passthrough=0)
+        finally:
+            rb.list_instances = orig
+        if "Rhino 8 is not running" not in text or "trimmed_plane" not in text:
+            fails.append("rhino missing fallback: %s" % text[-300:])
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export rhino: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
-          + run_export_passthrough() + run_export_changes())
+          + run_export_passthrough() + run_export_changes() + run_export_rhino())

@@ -150,10 +150,14 @@ def source_geometry(src_geom, scale):
     g = src_geom.Duplicate()
     if abs(scale - 1.0) > 1e-15:
         g.Scale(scale)
-    for key in ("h3dm.trims", "h3dm.source_type"):
-        try:
-            if g.GetUserString(key):
+    try:
+        keys = [str(kv[0]) for kv in (g.GetUserStrings() or ())]
+    except Exception:
+        keys = ["h3dm.trims", "h3dm.source_type", "h3dm.key"]
+    for key in keys:
+        if key.startswith("h3dm."):
+            try:
                 g.SetUserString(key, "")       # пустое значение удаляет ключ
-        except Exception:
-            pass
+            except Exception:
+                pass
     return g

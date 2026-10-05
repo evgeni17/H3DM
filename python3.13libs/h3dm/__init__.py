@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 
-__version__ = "0.4.0.dev4"
+__version__ = "0.4.0.dev5"
 
 # корень плагина: .../H3DM  (этот файл: .../H3DM/python3.13libs/h3dm/__init__.py)
 ROOT = os.environ.get("H3DM") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))

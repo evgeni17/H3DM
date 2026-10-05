@@ -239,8 +239,14 @@ def _attr_values(vals, size):
 def profiles_signature_doc(doc):
     """Вложенная геометрия profiles NURBMesh из .geo Houdini (None — без обрезки) -> подпись,
     сравнимая с profiles_signature()."""
+    return _signature(profile_regions_doc(doc))
+
+
+def profile_regions_doc(doc):
+    """Вложенная геометрия profiles из .geo -> области [[(порядок, узлы, точки (n, 3) = (u, v, w), u0, u1)]]
+    в параметрах примитива (как в Houdini)."""
     if not doc:
-        return _signature([])
+        return []
     d = _kv(doc)
     P = np.zeros((0, 3))
     for a in _kv(d.get("attributes", [])).get("pointattributes", []):
@@ -266,7 +272,7 @@ def profiles_signature_doc(doc):
                           float(fk.get("u1", kn[-1] if len(kn) else 0.0))))
         if faces:
             regions.append(faces)
-    return _signature(regions)
+    return regions
 
 
 def surface_profiles(geo_doc):

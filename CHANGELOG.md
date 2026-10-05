@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.4.0-dev.5 — 2026-10-05
+Export, step 4: changed trimmed Breps are rebuilt in Rhino.
+* **Trimmed Surfaces = Rebuild in Rhino** (new default): every NURBS face of a changed object with trimmed faces
+  is sent to a running Rhino 8 (`rhino/h3dm_retrim.py`, same RhinoCode bridge as Prepare in Rhino) — the surface
+  as it is in Houdini (positions in the export coordinates, weights, knots) and its trim loops: the exact loops of
+  the import when the trim signature shows the trims were not edited in Houdini, otherwise Houdini's current trim
+  curves (read from .geo). Rhino builds each face Brep by hand (2D trims, pushed-up edges, shared vertices,
+  singular trims at poles, seams joined), sorts loops by nesting (outer CCW, holes CW; several outer loops — several
+  faces), checks IsValidWithLog, joins the faces (JoinBreps) and writes them to a temporary .3dm that the export
+  copies. Objects Rhino cannot rebuild — or all of them when Rhino is not running — fall back to exact trimmed
+  planes and meshes with a warning; objects whose faces no longer meet are written as several Breps with a warning.
+* Trimmed planes without Rhino now also use the trim signature: if the trims were edited in Houdini, the current
+  Houdini loop is used instead of the stored import loop.
+* `rhino_bridge.submit_script` — generic jobs for scripts in Rhino.
+* Tests (`run_export_rhino`, needs Rhino 8): all four trimmed objects of the prepared fixture rebuilt from Houdini
+  match the source (faces, edges, loops, solids, bounding box; in Rhino also equal areas and volumes); a column moved
+  by 0.1 m comes back 100 mm higher and still solid while the rest is copied; a hole removed in Houdini is gone;
+  deformed faces give valid Breps and the warning for an open column; without Rhino — planes, meshes and a warning.
+
 ## 0.4.0-dev.4 — 2026-10-05
 Fixes from the 0.4.0-dev.3 review (both reproduced; not a release yet).
 * **Edits of NURBS faces were lost:** the unchanged-object check compared only control point positions, so a

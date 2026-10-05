@@ -115,7 +115,7 @@ def _verb(name, parms):
     return v
 
 
-def prepare_geometry(src, node, warn, keep_blocks=False, pt=None):
+def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
     """Копия входа: packed раскрыты (с атрибутами; при keep_blocks блоки остаются packed), многоугольники
     > 4 сторон разбиты, обрезанные NURBS и прочие примитивы — в полигоны."""
     geo = hou.Geometry()
@@ -143,8 +143,17 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None):
     # неизменённые объекты Brep/Extrusion: исходная геометрия из файла импорта (до любых преобразований)
     if pt:
         _mark_passthrough(geo, pt)
-    pg = geo.findPrimGroup("__h3dm_pass")
-    trimmed_mode = _p(node, "trimmed", "mesh")
+    trimmed_mode = _p(node, "trimmed", "rhino")
+    # изменённые объекты с обрезанными гранями -> пересборка в запущенном Rhino (точные Brep, объединённые)
+    if trimmed_mode == "rhino" and rt is not None:
+        _rebuild_in_rhino(geo, rt, warn)
+    # готовые примитивы (исходник / Rhino) дальше не обрабатываются
+    done = geo.createPrimGroup("__h3dm_done")
+    for name in ("__h3dm_pass", "__h3dm_rt"):
+        g = geo.findPrimGroup(name)
+        if g is not None:
+            done.add(g.prims())
+    pg = done if done.prims() else None
     # обрезанные плоские грани с одной (внешней) петлёй -> точная обрезанная плоскость (Brep без Rhino)
     n_plane = _mark_trimmed_planes(geo, pg)
     trim_grp = [g for g in (geo.findPrimGroup(n) for n in TRIM_GROUPS) if g is not None]
@@ -167,9 +176,11 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None):
             out = hou.Geometry()
             _verb("convert", {"group": names, "totype": 0, "lodu": lod, "lodv": lod, "lodtrim": lod}).execute(out, [geo])
             geo = out
-            warn.append("%d trimmed NURBS faces of changed objects written as meshes (rebuilding in Rhino comes in the next 0.4 step)."
-                        % n_trim)
+            warn.append("%d trimmed NURBS faces of changed objects written as meshes%s." % (
+                n_trim, " (Trimmed Surfaces = Convert to Mesh)" if trimmed_mode == "mesh" else
+                " (not rebuilt in Rhino, see above)" if rt is not None and rt.get("tried") else ""))
     approx = geo.findPrimGroup(UNTRIMMED_APPROX)
+    pg = geo.findPrimGroup("__h3dm_done")
     if approx is not None and pg is not None:
         approx.remove(pg.prims())          # неизменённые объекты уходят исходной геометрией — грани нужны
     if approx is not None and approx.prims():
@@ -193,6 +204,7 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None):
         if g is not None:
             g.destroy()
     # многоугольники > 4 сторон -> треугольники/четырёхугольники (Rhino Mesh: 3–4 вершины)
+    pg = geo.findPrimGroup("__h3dm_done")
     passed = {p.number() for p in pg.prims()} if pg is not None else set()
     big = [p for p in geo.prims() if p.type() == hou.primType.Polygon and p.isClosed() and p.numVertices() > 4
            and p.number() not in passed]
@@ -228,22 +240,19 @@ def _mark_trimmed_planes(geo, skip_group=None):
     грани с отверстиями так не строятся (в rhino3dm нет многопетлевой обрезки)."""
     import json
     tg = geo.findPrimGroup(TRIM_GROUPS[0])
-    if tg is None or geo.findPrimAttrib("rhino_trim_loops") is None:
+    if tg is None:
         return 0
     has_pw = geo.findPointAttrib("Pw") is not None
     sel = []
     skip = {p.number() for p in skip_group.prims()} if skip_group is not None else set()
-    for prim in tg.prims():
-        if prim.type() != hou.primType.NURBSSurface or prim.number() in skip:
-            continue
-        if (int(prim.intrinsicValue("uorder")), int(prim.intrinsicValue("vorder")),
-                int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))) != (2, 2, 2, 2):
-            continue
-        try:
-            loops = json.loads(prim.attribValue("rhino_trim_loops") or "[]")
-        except Exception:
-            continue
-        if len(loops) != 1:
+    cand = [prim for prim in tg.prims() if prim.type() == hou.primType.NURBSSurface and prim.number() not in skip
+            and (int(prim.intrinsicValue("uorder")), int(prim.intrinsicValue("vorder")),
+                 int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))) == (2, 2, 2, 2)]
+    state = _trim_state(geo, [p.number() for p in cand])
+    tl = None
+    for prim in cand:
+        loops = state.get(prim.number())
+        if not loops or len(loops) != 1:
             continue
         pts = [[prim.vertex(u, v).point() for u in range(2)] for v in range(2)]
         if has_pw and any(abs(p.attribValue("Pw") - 1.0) > 1e-9 for row in pts for p in row):
@@ -251,11 +260,47 @@ def _mark_trimmed_planes(geo, skip_group=None):
         P = np.array([[tuple(p.position()) for p in row] for row in pts], dtype=np.float64)
         if _plane_frame(P) is None:
             continue
+        if tl is None:
+            tl = geo.findPrimAttrib("__h3dm_tloops") or geo.addAttrib(hou.attribType.Prim, "__h3dm_tloops", "")
+        prim.setAttribValue(tl, json.dumps(loops, separators=(",", ":")))
         sel.append(prim)
     if sel:
         g = geo.findPrimGroup("__h3dm_tplane") or geo.createPrimGroup("__h3dm_tplane")
         g.add(sel)
     return len(sel)
+
+
+def _loops_from_regions(regions):
+    """Области обрезки Houdini (profile_regions_doc) -> петли в формате rhino_trim_loops."""
+    out = []
+    for faces in regions:
+        out.append({"t": "", "c": [{"o": int(o), "k": [float(x) for x in kn],
+                                    "p": [[float(p[0]), float(p[1]), 1.0] for p in P]} for o, kn, P, _, _ in faces]})
+    return out
+
+
+def _trim_state(geo, numbers):
+    """Петли обрезки примитивов для экспорта: {номер: петли}. Точные петли импорта (rhino_trim_loops, с весами)
+    — только если кривые обрезки в Houdini не меняли (подпись rhino_trim_sig совпадает); иначе текущие кривые
+    Houdini. Без обрезки -> []."""
+    import json
+    if not numbers:
+        return {}
+    cur = _trim_curves(geo, numbers)
+    has_sig = geo.findPrimAttrib("rhino_trim_sig") is not None
+    has_loops = geo.findPrimAttrib("rhino_trim_loops") is not None
+    out = {}
+    for pn in numbers:
+        sig, regions = cur.get(pn, (None, []))
+        prim = geo.prim(pn)
+        exact = None
+        if has_sig and has_loops and sig is not None and (prim.attribValue("rhino_trim_sig") or "").split(":")[0] == sig:
+            try:
+                exact = json.loads(prim.attribValue("rhino_trim_loops") or "null")
+            except Exception:
+                exact = None
+        out[pn] = exact if exact else _loops_from_regions(regions)
+    return out
 
 
 def _mark_passthrough(geo, pt):
@@ -346,11 +391,17 @@ def _mark_passthrough(geo, pt):
 
 
 def _trim_signatures(geo, numbers):
-    """Подписи текущих кривых обрезки NURBS-поверхностей (номера примитивов) -> {номер: подпись}.
+    """Подписи текущих кривых обрезки NURBS-поверхностей (номера примитивов) -> {номер: подпись}."""
+    return {pn: sig for pn, (sig, _) in _trim_curves(geo, numbers).items()}
+
+
+def _trim_curves(geo, numbers):
+    """Текущие кривые обрезки NURBS-поверхностей -> {номер: (подпись, области profile_regions_doc)}.
     HOM не даёт кривые обрезки, поэтому выбранные примитивы сохраняются во временный .geo (JSON) и читаются."""
     import json
     import tempfile
-    from .houjson import profiles_signature_doc, surface_profiles
+    from .houjson import profile_regions_doc, surface_profiles, _signature
+    numbers = sorted(numbers)
     if not numbers:
         return {}
     grp = geo.findPrimGroup("__h3dm_sig") or geo.createPrimGroup("__h3dm_sig")
@@ -379,7 +430,139 @@ def _trim_signatures(geo, numbers):
     profs = surface_profiles(doc)
     if len(profs) != len(numbers):
         return {}
-    return {pn: profiles_signature_doc(pr) for pn, pr in zip(numbers, profs)}
+    out = {}
+    for pn, pr in zip(numbers, profs):
+        regions = profile_regions_doc(pr)
+        out[pn] = (_signature(regions), regions)
+    return out
+
+
+def _rt_keys(geo):
+    """Ключ объекта для пересборки: rhino_id + вставка + путь части (новая геометрия — по примитиву)."""
+    n = geo.intrinsicValue("primitivecount")
+
+    def vals(name):
+        return list(geo.primStringAttribValues(name)) if geo.findPrimAttrib(name) is not None else [""] * n
+    rid, inst, part = vals("rhino_id"), vals("rhino_instance_id"), vals("rhino_part_path")
+    return ["%s|%s|%s" % (rid[i], inst[i], part[i]) if rid[i] else "prim%d" % i for i in range(n)]
+
+
+def _rebuild_in_rhino(geo, rt, warn):
+    """Изменённые объекты с обрезанными гранями (rhino_trimmed_exact, не из исходника) -> задание в Rhino
+    (rhino/h3dm_retrim.py): все NURBS-грани объекта, точные петли обрезки или текущие кривые Houdini.
+    Удачно пересобранные: группа __h3dm_rt, атрибут __h3dm_rtkey, rt['map'][ключ] = [Brep]. -> число объектов."""
+    tg = geo.findPrimGroup(TRIM_GROUPS[0])
+    if tg is None:
+        return 0
+    NSURF = hou.primType.NURBSSurface
+
+    def numbers(name):
+        g = geo.findPrimGroup(name)
+        return {p.number() for p in g.prims()} if g is not None else set()
+    skip = numbers("__h3dm_pass")
+    approx, helper = numbers(UNTRIMMED_APPROX), numbers(TRIM_CURVES)
+    trimmed = {p.number() for p in tg.prims() if p.type() == NSURF and p.number() not in skip}
+    if not trimmed:
+        return 0
+    keys = _rt_keys(geo)
+    want = {keys[i] for i in trimmed}
+    members = {}
+    for prim in geo.prims():
+        i = prim.number()
+        if keys[i] in want and prim.type() == NSURF and i not in helper:
+            members.setdefault(keys[i], []).append(i)
+    for i in approx | skip:
+        members.pop(keys[i], None)              # грань без данных обрезки — объект не собрать
+    if not members:
+        return 0
+    loops = _trim_state(geo, sorted(i for idx in members.values() for i in idx if i in trimmed))
+    P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
+    W = (np.array(geo.pointFloatAttribValues("Pw"), dtype=np.float64)
+         if geo.findPointAttrib("Pw") is not None else np.ones(len(P)))
+    to = rt["to"]
+    objects = []
+    for k, idx in members.items():
+        faces = []
+        for i in idx:
+            pr = geo.prim(i)
+            nu, nv = int(pr.intrinsicValue("nu")), int(pr.intrinsicValue("nv"))
+            if pr.intrinsicValue("uwrap") or pr.intrinsicValue("vwrap"):
+                faces = None
+                break
+            vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)]).reshape(-1)
+            faces.append({"prim": i, "cv": to(P[vi]).reshape(nv, nu, 3).tolist(), "w": W[vi].reshape(nv, nu).tolist(),
+                          "ku": [float(x) for x in pr.intrinsicValue("uknots")],
+                          "kv": [float(x) for x in pr.intrinsicValue("vknots")],
+                          "ou": int(pr.intrinsicValue("uorder")), "ov": int(pr.intrinsicValue("vorder")),
+                          "loops": loops.get(i, [])})
+        if faces:
+            objects.append({"key": k, "faces": faces})
+    if not objects:
+        return 0
+    rt["tried"] = True
+    got = _run_retrim(objects, rt, warn)
+    if not got:
+        return 0
+    sel = []
+    ka = geo.findPrimAttrib("__h3dm_rtkey") or geo.addAttrib(hou.attribType.Prim, "__h3dm_rtkey", "")
+    for k, breps in got.items():
+        rt["map"][k] = breps
+        for i in members[k]:
+            pr = geo.prim(i)
+            pr.setAttribValue(ka, k)
+            sel.append(pr)
+    if sel:
+        g = geo.findPrimGroup("__h3dm_rt") or geo.createPrimGroup("__h3dm_rt")
+        g.add(sel)
+    rt["count"] = rt.get("count", 0) + len(got)
+    return len(got)
+
+
+def _run_retrim(objects, rt, warn, timeout=None):
+    """Задание пересборки в Rhino -> {ключ: [Brep rhino3dm]} для удачных объектов; ошибки — в warn."""
+    import json
+    import os as _os
+    from . import rhino_bridge as rb
+    from .rhino_read import read
+    nf = sum(len(o["faces"]) for o in objects)
+    if not rb.list_instances():
+        warn.append("Rhino 8 is not running: %d changed objects with trimmed faces (%d faces) could not be "
+                    "rebuilt exactly. Start Rhino 8 and export again, or keep the meshes." % (len(objects), nf))
+        return {}
+    out = _os.path.join(rb.jobs_dir(), "retrim_%s.3dm" % _os.urandom(6).hex())
+    try:
+        state = rb.submit_script(rb.RETRIM_SCRIPT, {"objects": objects, "tol": rt["tol"], "out": out},
+                                 rt.get("rhino"))
+        res = rb.wait(state, timeout=timeout or max(60.0, 0.5 * nf + 30.0))
+    except rb.BridgeError as ex:
+        warn.append("Rebuilding trimmed faces in Rhino failed: %s" % ex)
+        return {}
+    if res.get("status") != "ok":
+        warn.append("Rebuilding trimmed faces in Rhino failed (%s): %s" % (res.get("status"),
+                                                                          str(res.get("error", ""))[-400:]))
+        return {}
+    bad = {k: v for k, v in (res.get("objects") or {}).items() if not v.get("ok")}
+    if bad:
+        warn.append("%d objects could not be rebuilt in Rhino and are written as meshes: %s" % (
+            len(bad), "; ".join("%s: %s" % (k.split("|")[0][:8], v.get("error", "")[:160]) for k, v in list(bad.items())[:5])))
+    split = {k: v for k, v in (res.get("objects") or {}).items() if v.get("ok") and int(v.get("breps", 1)) > 1}
+    if split:
+        warn.append("%d objects rebuilt in Rhino did not join into one Brep (their edges no longer meet after the "
+                    "change) and are written as several Breps: %s" % (
+                        len(split), ", ".join("%s (%d)" % (k.split("|")[0][:8], v["breps"]) for k, v in list(split.items())[:8])))
+    got = {}
+    try:
+        f = read(out)
+        for o in f.Objects:
+            k = o.Geometry.GetUserString("h3dm.key")
+            if k:
+                got.setdefault(k, []).append(o.Geometry)
+    finally:
+        try:
+            _os.remove(out)
+        except OSError:
+            pass
+    return {k: v for k, v in got.items() if k not in bad}
 
 
 def _mark_free_points(geo):
@@ -530,6 +713,7 @@ class Plan(object):
         self.definitions = {}    # geometryid -> {'name', 'objects'}
         self.def_order = []      # вложенные определения раньше внешних
         self.passthrough = 0     # объектов перенесено из файла импорта без изменений
+        self.rebuilt = 0         # объектов с обрезанными гранями пересобрано в Rhino
 
 
 def collect(node):
@@ -647,7 +831,12 @@ def collect(node):
         top = depth == 0
         pt = {"src": source3dm, "to": to_file, "scale": factor, "abs_tol": plan.abs_tol, "map": {},
               "eps": lambda m: 8 * 1.2e-7 * m / s_ * factor} if source3dm is not None else None
-        geo = prepare_geometry(geo_in, node, warn, keep_blocks, pt)
+        rt = {"to": to_file, "tol": plan.abs_tol, "map": {}}
+        geo = prepare_geometry(geo_in, node, warn, keep_blocks, pt, rt)
+        plan.rebuilt += rt.get("count", 0)
+        rgrp = geo.findPrimGroup("__h3dm_rt")
+        rebuilt = {p.number() for p in rgrp.prims()} if rgrp is not None else set()
+        rt_done = set()
         if pt and pt.get("no_sig"):
             warn.append("%d unchanged NURBS objects were imported by an older H3DM (no rhino_trim_sig): their trims "
                         "cannot be verified, so they are exported from Houdini geometry. Re-import to copy them "
@@ -775,6 +964,13 @@ def collect(node):
         tplane = {p.number() for p in tpg.prims()} if tpg is not None else set()
         for i, prim in enumerate(prims):
             t = prim.type()
+            if i in rebuilt:
+                k = prim.attribValue("__h3dm_rtkey")
+                if k not in rt_done:
+                    rt_done.add(k)
+                    for b in rt["map"].get(k, []):
+                        objects.append({"kind": "source", "geom": {"g": b, "scale": 1.0}, "attrs": attrs_of(i, prim)})
+                continue
             if i in passed:
                 if rid_v[i] not in pass_done:
                     pass_done.add(rid_v[i])
@@ -906,7 +1102,7 @@ def _trimmed_plane(prim, P, to_file):
     ku = [ku_h[0] + ku_h[-1] - x for x in reversed(ku_h)]
     u0, u1, v0, v1 = ku[1], ku[2], kv[1], kv[2]
     P00, P10, P01 = cv[0, 0], cv[0, 1], cv[1, 0]
-    loops = json.loads(prim.attribValue("rhino_trim_loops"))
+    loops = json.loads(prim.attribValue("__h3dm_tloops"))
     curves = []
     for c in loops[0]["c"]:
         uvw = np.array(c["p"], dtype=np.float64)
@@ -1074,6 +1270,8 @@ def report_text(plan, path=None, writer=None, back=None):
                  % (len(plan.layers), len(plan.materials), len(plan.groups), len([d for d in plan.definitions.values() if d])))
     if plan.passthrough:
         lines.append("Unchanged objects written from the source file (exact Breps): %d" % plan.passthrough)
+    if plan.rebuilt:
+        lines.append("Changed objects with trimmed faces rebuilt in Rhino (exact Breps): %d" % plan.rebuilt)
     lines.append("Units: %s   Transform: %s, origin %s, scale %g, %s"
                  % (plan.units, gx.source, " ".join("%.3f" % x for x in gx.origin), gx.s,
                     "Y-up -> Z-up" if gx.yup else "Z-up"))

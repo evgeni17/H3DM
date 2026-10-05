@@ -334,13 +334,17 @@ def _export_ptg():
                      "or mesh within tolerance, after the export transform) are copied from the source .3dm "
                      "(detail attribute rhino_file) exactly: trims, holes, joined faces, extrusions. Changed "
                      "objects are exported from Houdini geometry. Works when the source file is still available."),
-        _menu("trimmed", "Trimmed Surfaces", [("mesh", "Convert to Mesh"), ("skip", "Skip")],
-              help="Trimmed NURBS faces (group rhino_trimmed_exact) of changed objects. Planar faces with one "
-                   "outer loop (no holes) are always written exactly as trimmed planes. The others are meshed "
-                   "for now (Houdini Convert respects the trims); rebuilding in Rhino comes next. "
+        _menu("trimmed", "Trimmed Surfaces", [("rhino", "Rebuild in Rhino (Mesh if Not Possible)"),
+                                               ("mesh", "Convert to Mesh"), ("skip", "Skip")],
+              help="Trimmed NURBS faces (group rhino_trimmed_exact) of changed objects. Rebuild in Rhino: every "
+                   "NURBS face of such an object is rebuilt in a running Rhino 8 (surface + trim loops: the exact "
+                   "loops of the import if the trims were not edited in Houdini, otherwise Houdini's current trim "
+                   "curves) and the faces are joined; objects Rhino cannot rebuild, or all of them when Rhino is "
+                   "not running, fall back with a warning: planar faces with one outer loop as exact trimmed "
+                   "planes, the rest as meshes (Houdini Convert respects the trims). "
                    "Faces imported without trim data (rhino_trimmed_surfaces) are never exported."),
         hou.FloatParmTemplate("meshlod", "Mesh Level of Detail", 1, default_value=(4.0,), min=0.5, max=32.0,
-                              conditionals={HIDE: "{ trimmed != mesh }"},
+                              conditionals={HIDE: "{ trimmed == skip }"},
                               help="Convert LOD for trimmed faces (divisions per span)."),
         _toggle("textdots", "Points with s@text to Text Dots", True),
         _toggle("points", "Other Points to Point Objects", True,

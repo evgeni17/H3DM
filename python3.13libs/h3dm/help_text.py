@@ -280,10 +280,15 @@ writing. The report (and the read-back check) is on the *Report* tab.
   for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
 * Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
 * NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini).
-* Trimmed NURBS faces (`rhino_trimmed_exact`): planar faces with one outer loop (no holes) are written exactly
-  as trimmed planes (arcs stay arcs; the trim loop is kept from the import in `rhino_trim_loops`, so moving or
-  rotating the face is fine). Changed faces with holes and changed curved trimmed faces are meshes for now
-  (Houdini Convert respects the trims); rebuilding them in Rhino comes next.
+* Changed objects with trimmed NURBS faces (`rhino_trimmed_exact`), __Trimmed Surfaces__ = *Rebuild in Rhino*
+  (default): all NURBS faces of the object are sent to a running Rhino 8 (the same one Prepare in Rhino uses; your
+  open document is not touched) and rebuilt there as exact trimmed faces — the surface as it is in Houdini, the
+  trim loops exactly as imported (`rhino_trim_loops`, with arcs) when the trims were not edited in Houdini,
+  otherwise Houdini's current trim curves — then joined into one Brep (solids stay solids when the faces still
+  meet; otherwise several Breps with a warning). Holes, curved faces, poles and seams are supported.
+* Without Rhino (not running, an object it cannot rebuild, or *Convert to Mesh*): planar faces with one outer
+  loop are written exactly as trimmed planes (arcs stay arcs), the rest as meshes (Houdini Convert respects the
+  trims), with a warning.
 * Faces imported without trim data (`rhino_trimmed_surfaces`) are not exported: re-import after Prepare in Rhino.
 * Packed primitives (__Packed Primitives__ = *Blocks*): block definitions (one per shared geometry, nested blocks
   too) and insertions with their full 4x4 transform; an insertion that was not moved keeps the exact double
@@ -347,10 +352,16 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
   `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.
 * Открытые полигоны — полилинии. NURBS-кривые — точные NURBS (замкнутые кривые Houdini — периодические).
 * NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini).
-* Обрезанные NURBS-грани (`rhino_trimmed_exact`): плоские грани с одной внешней петлёй (без отверстий) пишутся
-  точно — обрезанной плоскостью (дуги остаются дугами; петля хранится с импорта в `rhino_trim_loops`, поэтому
-  перенос и поворот грани допустимы). Изменённые грани с отверстиями и криволинейные обрезанные — пока сетками
-  (Convert Houdini учитывает обрезку); пересборка в Rhino — следующий шаг.
+* Изменённые объекты с обрезанными NURBS-гранями (`rhino_trimmed_exact`), __Trimmed Surfaces__ = *Rebuild in
+  Rhino* (по умолчанию): все NURBS-грани объекта отправляются в запущенный Rhino 8 (тот же, что для Prepare in
+  Rhino; открытый документ не трогается) и собираются там точными обрезанными гранями — поверхность как в
+  Houdini, петли обрезки точно как при импорте (`rhino_trim_loops`, с дугами), если обрезку в Houdini не меняли,
+  иначе текущие кривые обрезки Houdini — и объединяются в один Brep (тела остаются телами, если грани
+  по-прежнему сходятся; иначе несколько Brep с предупреждением). Отверстия, криволинейные грани, полюса и швы
+  поддерживаются.
+* Без Rhino (не запущен, объект не собирается или *Convert to Mesh*): плоские грани с одной внешней петлёй
+  пишутся точно обрезанными плоскостями (дуги остаются дугами), остальные — сетками (Convert Houdini учитывает
+  обрезку), с предупреждением.
 * Грани, импортированные без данных обрезки (`rhino_trimmed_surfaces`), не экспортируются: импортируйте файл
   после Prepare in Rhino.
 * Packed-примитивы (__Packed Primitives__ = *Blocks*): определения блоков (одно на общую геометрию, вложенные

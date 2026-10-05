@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: 2026 EOK
 # SPDX-License-Identifier: Apache-2.0
-"""Связь с запущенным Rhino 8 через RhinoCode CLI: подготовка .3dm (rhino/h3dm_prepare.py) по заданию.
+"""Связь с запущенным Rhino 8 через RhinoCode CLI: задания для скриптов в Rhino — подготовка .3dm
+(rhino/h3dm_prepare.py) и пересборка изменённых обрезанных граней при экспорте (rhino/h3dm_retrim.py).
 
 Протокол:
   1. H3DM пишет задание JSON {id, source, settings} и скрипт-обёртку в $HOUDINI_TEMP_DIR/h3dm_jobs/;
@@ -24,6 +25,7 @@ import uuid
 from . import ROOT
 
 PREPARE_SCRIPT = os.path.join(ROOT, "rhino", "h3dm_prepare.py")
+RETRIM_SCRIPT = os.path.join(ROOT, "rhino", "h3dm_retrim.py")
 _JOBS = {}            # id задания -> состояние (для отмены и игнорирования поздних результатов)
 
 
@@ -101,14 +103,22 @@ def jobs_dir():
 
 
 def submit(source, settings=None, rhino_id=None):
-    """Отправить задание в Rhino. -> {'id', 'job', 'result', 'started'}. Не ждёт результата."""
+    """Отправить задание подготовки в Rhino. -> состояние {'id', 'job', 'result', ...}. Не ждёт результата."""
     if not os.path.isfile(source):
         raise BridgeError("Source file not found: %s" % source)
     with open(source, "rb") as fh:
         if fh.read(24) != b"3D Geometry File Format ":
             raise BridgeError("Not a Rhino .3dm file: %s" % source)
-    if not os.path.isfile(PREPARE_SCRIPT):
-        raise BridgeError("Prepare script not found: %s" % PREPARE_SCRIPT)
+    state = submit_script(PREPARE_SCRIPT, {"source": os.path.abspath(source), "settings": dict(settings or {})},
+                          rhino_id)
+    state["source"] = os.path.abspath(source)
+    return state
+
+
+def submit_script(script, payload, rhino_id=None):
+    """Отправить в Rhino задание {id, **payload} для скрипта script (он читает H3DM_JOB). Не ждёт результата."""
+    if not os.path.isfile(script):
+        raise BridgeError("Rhino script not found: %s" % script)
     inst = list_instances()
     if not inst:
         raise BridgeError("No running Rhino 8 found. Start Rhino 8 (if it is running, run the Rhino command "
@@ -121,19 +131,21 @@ def submit(source, settings=None, rhino_id=None):
     d = jobs_dir()
     job = os.path.join(d, "job_%s.json" % jid)
     runner = os.path.join(d, "run_%s.py" % jid)
+    data = dict(payload)
+    data["id"] = jid
     with open(job, "w", encoding="utf-8") as fh:
-        json.dump({"id": jid, "source": os.path.abspath(source), "settings": dict(settings or {})}, fh)
+        json.dump(data, fh)
     with open(runner, "w", encoding="utf-8") as fh:
-        fh.write("# H3DM: задание подготовки %s\n" % jid)
+        fh.write("# H3DM: задание %s (%s)\n" % (jid, os.path.basename(script)))
         fh.write("H3DM_JOB = %r\n" % job)
-        fh.write("exec(compile(open(%r, encoding='utf-8').read(), %r, 'exec'))\n" % (PREPARE_SCRIPT, PREPARE_SCRIPT))
+        fh.write("exec(compile(open(%r, encoding='utf-8').read(), %r, 'exec'))\n" % (script, script))
     # CLI запускается без ожидания: dotnet стартует ~3 с, интерфейс Houdini не должен ждать
     log = open(job + ".cli.log", "w", encoding="utf-8")
     proc = subprocess.Popen(cli_command() + ["--rhino", rid, "script", runner], stdout=log, stderr=subprocess.STDOUT,
                             stdin=subprocess.DEVNULL)
     state = {"id": jid, "job": job, "result": job + ".result.json", "started": time.time(), "rhino": rid,
              "rhino_pid": rpid, "progress": job + ".progress.json",
-             "source": os.path.abspath(source), "cancelled": False, "proc": proc, "log": log}
+             "cancelled": False, "proc": proc, "log": log}
     _JOBS[jid] = state
     return state
 
