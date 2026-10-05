@@ -345,6 +345,12 @@ class Writer(object):
             return None
         return self._add("trimmed_plane", b, attrs, self.f.Objects.AddBrep)
 
+    def add_source(self, geom, scale, attrs):
+        """Исходная геометрия из файла импорта (неизменённый объект) — как есть, в единицах файла."""
+        from .passthrough import source_geometry
+        g = source_geometry(geom, scale)
+        return self._add("source", g, attrs, self.f.Objects.Add)
+
     def add_textdot(self, text, pt, attrs):
         r = _r()
         dot = r.TextDot(str(text), r.Point3d(*[float(x) for x in pt]))

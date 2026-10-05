@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0-dev.3 — 2026-10-05
+Export, step 3: unchanged Breps go back exactly.
+* **Unchanged objects from the source file** (new toggle, on by default): a Brep or extrusion imported with H3DM
+  whose faces still match the source file is copied from it (detail `rhino_file`) instead of being rebuilt from
+  Houdini geometry: holes, joined faces, solids and seams stay exact. The check needs no fingerprints at import:
+  every face is compared by its `rhino_face` primitives — NURBS faces by control points (U may be reversed),
+  mesh faces by the vertices of each render-mesh face in import order — after the export transform, within float32
+  precision of the Houdini positions. Works in every geometry mode and for block definitions. Attributes (layer,
+  name, material, User Text, id) still come from Houdini. Service user strings `h3dm.*` are removed.
+* Test: the prepared fixture (all NURBS and meshes) — all 6 Breps come back with the same faces, edges, loops and
+  bounding box; a renamed layer is kept; a moved object is exported from Houdini; the toggle off disables it.
+  Checked in Rhino 8: all valid, solids stay solids, the panel with a hole keeps 2 loops, areas identical.
+
 ## 0.4.0-dev.2 — 2026-10-05
 Export, step 2: blocks and exact trimmed planes.
 * **Blocks:** packed primitives become block definitions and insertions (one definition per shared geometry,

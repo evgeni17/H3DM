@@ -267,14 +267,20 @@ writing. The report (and the read-back check) is on the *Report* tab.
 
 @objects What becomes a Rhino object
 
+* Unchanged objects (__Unchanged Objects from Source File__, on by default): a Brep or extrusion imported with
+  H3DM whose faces still match the source file (control points of NURBS faces, vertices of mesh faces, after the
+  export transform, within float precision) is copied from the source .3dm (`rhino_file`) exactly: holes, joined
+  faces and solids stay as they were. Layer, name, material, User Text and the other attributes still come from
+  Houdini, so renaming or moving to another layer keeps the exact geometry. Works for block definitions too.
+  Any change of the shape (moving a point, a transform) exports the object from the Houdini geometry instead.
 * Closed polygons: one mesh per Rhino object of the import (`rhino_id`, or `rhino_instance_id` + `rhino_part_path`
   for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
 * Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
 * NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini).
 * Trimmed NURBS faces (`rhino_trimmed_exact`): planar faces with one outer loop (no holes) are written exactly
   as trimmed planes (arcs stay arcs; the trim loop is kept from the import in `rhino_trim_loops`, so moving or
-  rotating the face is fine). Faces with holes and curved trimmed faces are meshes for now (Houdini Convert
-  respects the trims); exact transfer of unchanged Breps and rebuilding in Rhino come next.
+  rotating the face is fine). Changed faces with holes and changed curved trimmed faces are meshes for now
+  (Houdini Convert respects the trims); rebuilding them in Rhino comes next.
 * Faces imported without trim data (`rhino_trimmed_surfaces`) are not exported: re-import after Prepare in Rhino.
 * Packed primitives (__Packed Primitives__ = *Blocks*): block definitions (one per shared geometry, nested blocks
   too) and insertions with their full 4x4 transform; an insertion that was not moved keeps the exact double
@@ -324,14 +330,20 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
 
 @objects Что становится объектом Rhino
 
+* Неизменённые объекты (__Unchanged Objects from Source File__, включено по умолчанию): Brep или экструзия из
+  импорта H3DM, грани которых совпадают с исходным файлом (управляющие точки NURBS-граней, вершины сеток граней —
+  после трансформа экспорта, с точностью float), копируются из исходного .3dm (`rhino_file`) точно: отверстия,
+  объединённые грани и тела остаются как были. Слой, имя, материал, User Text и прочие атрибуты берутся из
+  Houdini — переименование и перенос на другой слой сохраняют точную геометрию. Работает и для определений
+  блоков. Любое изменение формы (сдвиг точки, трансформ) — объект пишется из геометрии Houdini.
 * Замкнутые полигоны: одна сетка на объект Rhino импорта (`rhino_id`, у частей блоков — `rhino_instance_id` +
   `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.
 * Открытые полигоны — полилинии. NURBS-кривые — точные NURBS (замкнутые кривые Houdini — периодические).
 * NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini).
 * Обрезанные NURBS-грани (`rhino_trimmed_exact`): плоские грани с одной внешней петлёй (без отверстий) пишутся
   точно — обрезанной плоскостью (дуги остаются дугами; петля хранится с импорта в `rhino_trim_loops`, поэтому
-  перенос и поворот грани допустимы). Грани с отверстиями и криволинейные обрезанные — пока сетками (Convert
-  Houdini учитывает обрезку); точный перенос неизменённых Brep и пересборка в Rhino — следующие шаги.
+  перенос и поворот грани допустимы). Изменённые грани с отверстиями и криволинейные обрезанные — пока сетками
+  (Convert Houdini учитывает обрезку); пересборка в Rhino — следующий шаг.
 * Грани, импортированные без данных обрезки (`rhino_trimmed_surfaces`), не экспортируются: импортируйте файл
   после Prepare in Rhino.
 * Packed-примитивы (__Packed Primitives__ = *Blocks*): определения блоков (одно на общую геометрию, вложенные

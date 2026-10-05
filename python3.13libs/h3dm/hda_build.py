@@ -329,10 +329,15 @@ def _export_ptg():
     g.append(_folder("attr_f", "Attributes", at))
 
     ge = [
+        _toggle("passthrough", "Unchanged Objects from Source File", True,
+                help="Objects that were imported with H3DM and not modified (every face matches the source Brep "
+                     "or mesh within tolerance, after the export transform) are copied from the source .3dm "
+                     "(detail attribute rhino_file) exactly: trims, holes, joined faces, extrusions. Changed "
+                     "objects are exported from Houdini geometry. Works when the source file is still available."),
         _menu("trimmed", "Trimmed Surfaces", [("mesh", "Convert to Mesh"), ("skip", "Skip")],
-              help="Trimmed NURBS faces (group rhino_trimmed_exact). Planar faces with one outer loop (no holes) "
-                   "are always written exactly as trimmed planes. The others are meshed for now (Houdini Convert "
-                   "respects the trims); exact transfer of unchanged Breps and rebuilding in Rhino come next. "
+              help="Trimmed NURBS faces (group rhino_trimmed_exact) of changed objects. Planar faces with one "
+                   "outer loop (no holes) are always written exactly as trimmed planes. The others are meshed "
+                   "for now (Houdini Convert respects the trims); rebuilding in Rhino comes next. "
                    "Faces imported without trim data (rhino_trimmed_surfaces) are never exported."),
         hou.FloatParmTemplate("meshlod", "Mesh Level of Detail", 1, default_value=(4.0,), min=0.5, max=32.0,
                               conditionals={HIDE: "{ trimmed != mesh }"},

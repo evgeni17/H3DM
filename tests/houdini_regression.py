@@ -789,10 +789,11 @@ def run_export():
             fails.append("export edge cases: %s" % [(k[:8], f, a, b) for k, f, a, b in c["diffs"]][:4])
         src3 = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
         imp.parm("file").set(src3)
-        text, path = export("prepared.3dm")
+        text, path = export("prepared.3dm", passthrough=0)      # путь без исходного файла (Houdini-геометрия)
+        ex.parm("passthrough").set(1)
         dev = rt_compare.shape_deviation(src3, path)
         if dev["surfaces"] > 1e-3 or dev["n_surfaces"] < 15 or "trimmed_plane 2" not in text \
-                or "5 trimmed NURBS faces written as meshes" not in text:
+                or "5 trimmed NURBS faces of changed objects written as meshes" not in text:
             fails.append("export prepared: %s %s" % (dev, text[-200:]))
         # 3) далёкие координаты, единицы, источник трансформа
         f = r.File3dm.Read(src)
@@ -934,5 +935,87 @@ def run_export_new():
     return fails
 
 
+def run_export_passthrough():
+    """0.4 этап 3: неизменённые Brep уходят из исходного файла точно (отверстия, объединённые грани),
+    изменённые — из геометрии Houdini; правки атрибутов сохраняются."""
+    import shutil
+    import tempfile
+    from h3dm import sop_export as se, rhino_read as rr
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_pt_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_pt")
+    src = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+    S = rr.read(src)
+    breps = {str(o.Attributes.Id): o for o in S.Objects if rr.enum_name(o.Geometry.ObjectType) in ("Brep", "Extrusion")
+             and not o.Attributes.IsInstanceDefinitionObject}
+    dome = next(k for k, o in breps.items() if o.Attributes.Name == "Купол")
+    holed = next(k for k, o in breps.items() if o.Attributes.Name == "Панель с отверстием")
+
+    def loops(g):
+        k = rr.enum_name(g.ObjectType)
+        if k not in ("Brep", "Extrusion"):
+            return None
+        g = g if k == "Brep" else g.ToBrep(True)
+        return [len(g.Faces), len(g.Edges)] + [len(g.Faces[i].OuterLoop.Trims) for i in range(len(g.Faces))]
+
+    def box(g):
+        b = g.GetBoundingBox()
+        return (b.Min.X, b.Min.Y, b.Min.Z, b.Max.X, b.Max.Y, b.Max.Z)
+
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(src)
+        w = tmp.createNode("attribwrangle", "edit")
+        w.setInput(0, imp, 0)
+        w.parm("class").set(1)
+        w.parm("snippet").set('if (s@rhino_id == "%s") s@layer = "Novyy::Sloy";' % holed)
+        mv = tmp.createNode("attribwrangle", "move")
+        mv.setInput(0, w)
+        mv.parm("snippet").set('int pr[] = pointprims(0, @ptnum); '
+                               'if (len(pr) && prim(0, "rhino_id", pr[0]) == chs("id")) @P.y += 0.05;')
+        mv.addSpareParmTuple(hou.StringParmTemplate("id", "id", 1))
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, mv)
+        ex.setInput(1, imp, 2)
+        ex.parm("packed").set("explode")
+        for mode in ("all_nurbs", "mesh_curves"):
+            imp.parm("geomode").set(mode)
+            for moved in (False, True):
+                mv.parm("id").set(dome if moved else "")
+                ex.parm("file").set(os.path.join(out_dir, "%s_%d.3dm" % (mode, moved)))
+                text, path = se.run(ex, write=True)
+                B = {str(o.Attributes.Id): o for o in rr.read(path).Objects}
+                want = set(breps) - ({dome} if moved else set())
+                got = {k for k in breps if k in B and loops(B[k].Geometry) == loops(breps[k].Geometry)
+                       and max(abs(a - b) for a, b in zip(box(B[k].Geometry), box(breps[k].Geometry))) < 1e-9}
+                tag = "export passthrough %s%s" % (mode, " moved" if moved else "")
+                if not got >= want or ("exact Breps): %d" % len(want)) not in text:
+                    fails.append("%s: exact %d of %d" % (tag, len(got & want), len(want)))
+                if moved and dome in got:
+                    fails.append("%s: moved object copied from the source" % tag)
+                lay = B.get(holed)
+                if lay is None or rr.enum_name(lay.Geometry.ObjectType) != "Brep":
+                    fails.append("%s: holed panel missing" % tag)
+                else:
+                    f = rr.read(path)
+                    if f.Layers.FindIndex(lay.Attributes.LayerIndex).FullPath != "Novyy::Sloy":
+                        fails.append("%s: layer edit lost (%s)" % (tag, f.Layers.FindIndex(lay.Attributes.LayerIndex).FullPath))
+                if any(str(kv[0]).startswith("h3dm.") for o in B.values() for kv in (o.Geometry.GetUserStrings() or ())):
+                    fails.append("%s: h3dm.* user strings written" % tag)
+        ex.parm("passthrough").set(0)
+        mv.parm("id").set("")
+        ex.parm("file").set(os.path.join(out_dir, "off.3dm"))
+        text, path = se.run(ex, write=True)
+        if "exact Breps" in text:
+            fails.append("export passthrough off: still copied")
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export passthrough: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
-          + run_block_ids() + run_constant_attribs() + run_export() + run_export_new())
+          + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
+          + run_export_passthrough())

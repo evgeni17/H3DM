@@ -115,7 +115,7 @@ def _verb(name, parms):
     return v
 
 
-def prepare_geometry(src, node, warn, keep_blocks=False):
+def prepare_geometry(src, node, warn, keep_blocks=False, pt=None):
     """Копия входа: packed раскрыты (с атрибутами; при keep_blocks блоки остаются packed), многоугольники
     > 4 сторон разбиты, обрезанные NURBS и прочие примитивы — в полигоны."""
     geo = hou.Geometry()
@@ -140,10 +140,17 @@ def prepare_geometry(src, node, warn, keep_blocks=False):
     if unpacked:
         _finish_unpack(geo)
     _mark_free_points(geo)
+    # неизменённые объекты Brep/Extrusion: исходная геометрия из файла импорта (до любых преобразований)
+    if pt:
+        _mark_passthrough(geo, pt)
+    pg = geo.findPrimGroup("__h3dm_pass")
     trimmed_mode = _p(node, "trimmed", "mesh")
     # обрезанные плоские грани с одной (внешней) петлёй -> точная обрезанная плоскость (Brep без Rhino)
-    n_plane = _mark_trimmed_planes(geo)
+    n_plane = _mark_trimmed_planes(geo, pg)
     trim_grp = [g for g in (geo.findPrimGroup(n) for n in TRIM_GROUPS) if g is not None]
+    if pg is not None:
+        for g in trim_grp:
+            g.remove(pg.prims())
     if n_plane:
         tp = geo.findPrimGroup("__h3dm_tplane")
         for g in trim_grp:
@@ -160,9 +167,11 @@ def prepare_geometry(src, node, warn, keep_blocks=False):
             out = hou.Geometry()
             _verb("convert", {"group": names, "totype": 0, "lodu": lod, "lodv": lod, "lodtrim": lod}).execute(out, [geo])
             geo = out
-            warn.append("%d trimmed NURBS faces written as meshes (exact Brep transfer comes in the next 0.4 step)."
+            warn.append("%d trimmed NURBS faces of changed objects written as meshes (rebuilding in Rhino comes in the next 0.4 step)."
                         % n_trim)
     approx = geo.findPrimGroup(UNTRIMMED_APPROX)
+    if approx is not None and pg is not None:
+        approx.remove(pg.prims())          # неизменённые объекты уходят исходной геометрией — грани нужны
     if approx is not None and approx.prims():
         n = len(approx.prims())
         geo.deletePrims(approx.prims())
@@ -184,7 +193,9 @@ def prepare_geometry(src, node, warn, keep_blocks=False):
         if g is not None:
             g.destroy()
     # многоугольники > 4 сторон -> треугольники/четырёхугольники (Rhino Mesh: 3–4 вершины)
-    big = [p for p in geo.prims() if p.type() == hou.primType.Polygon and p.isClosed() and p.numVertices() > 4]
+    passed = {p.number() for p in pg.prims()} if pg is not None else set()
+    big = [p for p in geo.prims() if p.type() == hou.primType.Polygon and p.isClosed() and p.numVertices() > 4
+           and p.number() not in passed]
     if big:
         tmp = geo.createPrimGroup("__h3dm_ngons")
         tmp.add(big)
@@ -211,7 +222,7 @@ def _plane_frame(P):
     return P00, P10, P01
 
 
-def _mark_trimmed_planes(geo):
+def _mark_trimmed_planes(geo, skip_group=None):
     """Группа __h3dm_tplane: обрезанные грани (rhino_trimmed_exact) с одной петлёй на аффинной плоской
     поверхности (степень 1, 2x2, без весов). rhino3dm строит их точно (Brep.CreateTrimmedPlane);
     грани с отверстиями так не строятся (в rhino3dm нет многопетлевой обрезки)."""
@@ -221,8 +232,9 @@ def _mark_trimmed_planes(geo):
         return 0
     has_pw = geo.findPointAttrib("Pw") is not None
     sel = []
+    skip = {p.number() for p in skip_group.prims()} if skip_group is not None else set()
     for prim in tg.prims():
-        if prim.type() != hou.primType.NURBSSurface:
+        if prim.type() != hou.primType.NURBSSurface or prim.number() in skip:
             continue
         if (int(prim.intrinsicValue("uorder")), int(prim.intrinsicValue("vorder")),
                 int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))) != (2, 2, 2, 2):
@@ -244,6 +256,75 @@ def _mark_trimmed_planes(geo):
         g = geo.findPrimGroup("__h3dm_tplane") or geo.createPrimGroup("__h3dm_tplane")
         g.add(sel)
     return len(sel)
+
+
+def _mark_passthrough(geo, pt):
+    """Группа __h3dm_pass: примитивы объектов, чья геометрия совпадает с исходным файлом; pt['map'] заполняется
+    rid -> исходная геометрия. -> число объектов."""
+    from . import passthrough as pth
+    from .rhino_read import enum_name
+    import uuid
+    src = pt.get("src")
+    if src is None or geo.findPrimAttrib("rhino_id") is None or geo.findPrimAttrib("rhino_face") is None:
+        return 0
+    n = geo.intrinsicValue("primitivecount")
+    rid = list(geo.primStringAttribValues("rhino_id"))
+    inst = list(geo.primStringAttribValues("rhino_instance_id")) if geo.findPrimAttrib("rhino_instance_id") else [""] * n
+    rf = list(geo.primIntAttribValues("rhino_face"))
+    tcg = geo.findPrimGroup(TRIM_CURVES)
+    helper = {p.number() for p in tcg.prims()} if tcg is not None else set()   # кривые границ — не грани
+    by_obj = {}
+    for i in range(n):
+        if rid[i] and not inst[i] and i not in helper:
+            by_obj.setdefault(rid[i], {}).setdefault(rf[i], []).append(i)
+    if not by_obj:
+        return 0
+    prims = geo.prims()
+    P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
+    to, scale = pt["to"], pt["scale"]
+    sel = []
+    for r_id, faces in by_obj.items():
+        try:
+            o = src.Objects.FindId(uuid.UUID(r_id))
+        except Exception:
+            o = None
+        if o is None:
+            continue
+        g = o.Geometry
+        if enum_name(g.ObjectType) not in ("Brep", "Extrusion"):
+            continue
+        data, maxabs, ok = {}, 0.0, True
+        for fi, idx in faces.items():
+            ps = [prims[i] for i in idx]
+            if len(ps) == 1 and ps[0].type() == hou.primType.NURBSSurface:
+                pr = ps[0]
+                nu, nv = int(pr.intrinsicValue("nu")), int(pr.intrinsicValue("nv"))
+                vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)])
+                Ph = P[vi.reshape(-1)]
+                maxabs = max(maxabs, float(np.abs(Ph).max()))
+                data[fi] = ("nurbs", to(Ph).reshape(nv, nu, 3)[:, ::-1])
+            elif all(p.type() == hou.primType.Polygon and p.isClosed() for p in ps):
+                pos = []
+                for p in ps:
+                    vi = [v.point().number() for v in p.vertices()][::-1]   # обход Houdini -> Rhino
+                    Ph = P[vi]
+                    maxabs = max(maxabs, float(np.abs(Ph).max()))
+                    pos.append(to(Ph))
+                data[fi] = ("mesh", pos)
+            else:
+                ok = False
+                break
+        if not ok:
+            continue
+        tol = max(pt["abs_tol"], pt["eps"](maxabs))
+        if pth.object_unchanged(g, data, scale, tol):
+            pt["map"][r_id] = g
+            for idx in faces.values():
+                sel.extend(prims[i] for i in idx)
+    if sel:
+        grp = geo.findPrimGroup("__h3dm_pass") or geo.createPrimGroup("__h3dm_pass")
+        grp.add(sel)
+    return len(pt["map"])
 
 
 def _mark_free_points(geo):
@@ -393,6 +474,7 @@ class Plan(object):
         self.source_files = set()
         self.definitions = {}    # geometryid -> {'name', 'objects'}
         self.def_order = []      # вложенные определения раньше внешних
+        self.passthrough = 0     # объектов перенесено из файла импорта без изменений
 
 
 def collect(node):
@@ -440,6 +522,15 @@ def collect(node):
     sep = _p(node, "layersep", "::") or "::"
     default_layer = _p(node, "defaultlayer", "Houdini") or "Houdini"
     keep_blocks = _p(node, "packed", "blocks") == "blocks"
+    source3dm = None
+    if _p(node, "passthrough", 1) and src.findGlobalAttrib("rhino_file") is not None:
+        sp = src.attribValue("rhino_file")
+        if sp and os.path.isfile(sp):
+            try:
+                from .sop_import import open_file
+                source3dm = open_file(sp)
+            except Exception as ex:
+                warn.append("Source file for unchanged objects could not be read: %s" % ex)
     used_ids = set()
     C, s_ = gx.C, gx.s
 
@@ -499,7 +590,12 @@ def collect(node):
 
     def gather(geo_in, to_file, objects, depth):
         top = depth == 0
-        geo = prepare_geometry(geo_in, node, warn, keep_blocks)
+        pt = {"src": source3dm, "to": to_file, "scale": factor, "abs_tol": plan.abs_tol, "map": {},
+              "eps": lambda m: 8 * 1.2e-7 * m / s_ * factor} if source3dm is not None else None
+        geo = prepare_geometry(geo_in, node, warn, keep_blocks, pt)
+        pgrp = geo.findPrimGroup("__h3dm_pass")
+        passed = {p.number() for p in pgrp.prims()} if pgrp is not None else set()
+        pass_done = set()
         prims = geo.prims()
         n = len(prims)
         layer_v = _str_attr(geo, _p(node, "layerattrib", "layer") or "layer", n)
@@ -620,6 +716,13 @@ def collect(node):
         tplane = {p.number() for p in tpg.prims()} if tpg is not None else set()
         for i, prim in enumerate(prims):
             t = prim.type()
+            if i in passed:
+                if rid_v[i] not in pass_done:
+                    pass_done.add(rid_v[i])
+                    objects.append({"kind": "source", "geom": {"g": pt["map"][rid_v[i]], "scale": factor},
+                                    "attrs": attrs_of(i, prim)})
+                    plan.passthrough += 1
+                continue
             if t == POLY:
                 pts = [v.point().number() for v in prim.vertices()]
                 if prim.isClosed():
@@ -852,6 +955,8 @@ def write_plan(plan, path, node):
                 w.add_point_cloud(g["pts"], at, g.get("colors"))
             elif k == "instance":
                 w.add_instance(o["def"], o["xform"], at)
+            elif k == "source":
+                w.add_source(g["g"], g["scale"], at)
         except Exception as ex:
             w.warnings.append("%s '%s' skipped: %s" % (k, a.get("name", ""), ex))
 
@@ -891,6 +996,8 @@ def report_text(plan, path=None, writer=None, back=None):
     lines.append("Objects: %d  (%s)" % (len(plan.objects), ", ".join("%s %d" % kv for kv in sorted(kinds.items()))))
     lines.append("Layers: %d   Materials: %d   Groups: %d   Block definitions: %d"
                  % (len(plan.layers), len(plan.materials), len(plan.groups), len([d for d in plan.definitions.values() if d])))
+    if plan.passthrough:
+        lines.append("Unchanged objects written from the source file (exact Breps): %d" % plan.passthrough)
     lines.append("Units: %s   Transform: %s, origin %s, scale %g, %s"
                  % (plan.units, gx.source, " ".join("%.3f" % x for x in gx.origin), gx.s,
                     "Y-up -> Z-up" if gx.yup else "Z-up"))
