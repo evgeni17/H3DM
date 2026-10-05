@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.4.0-dev.2 — 2026-10-05
+Export, step 2: blocks and exact trimmed planes.
+* **Blocks:** packed primitives become block definitions and insertions (one definition per shared geometry,
+  nested blocks, mirrored / non-uniformly scaled insertions via the full 4x4). Insertions keep the exact double
+  matrix of the import (new prim attribute `rhino_xform`) unless they were moved in Houdini (float32 packed
+  transform). Insertion attributes (layer, name, material, User Text, id) and definition object attributes are
+  written separately. Test: the fixture's insertions come back with identical matrices (1e-9) and definition
+  names; an insertion moved by 1 m in Houdini is moved by 1000 mm in Rhino. *Packed Primitives = Explode* keeps
+  the old behaviour.
+* **Trimmed faces without Rhino:** planar faces with a single outer loop (no holes) on an affine planar surface are
+  written exactly with `Brep.CreateTrimmedPlane` (rhino3dm has no multi-loop trimming, so faces with holes and
+  curved trimmed faces stay meshes until the Rhino step). The exact loops (with weights) are stored at import
+  in `rhino_trim_loops`; the face may be moved or rotated. Checked in Rhino: the column caps (circles) have the
+  same area as the originals.
+* Material equal to the layer material is written "By Layer"; the layer material is set on the layer.
+* Read-back count includes block definition objects; report lists block definitions.
+
 ## 0.4.0-dev.1 — 2026-10-05
 Export, step 1 of 0.4 (decisions from the 0.3.0 review): meshes, curves, untrimmed surfaces, attributes and the
 global transform. Not a release yet: blocks, exact Breps and rebuilding trimmed faces in Rhino follow.

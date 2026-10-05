@@ -330,19 +330,21 @@ def _export_ptg():
 
     ge = [
         _menu("trimmed", "Trimmed Surfaces", [("mesh", "Convert to Mesh"), ("skip", "Skip")],
-              help="Trimmed NURBS faces (group rhino_trimmed_exact). Exact Brep transfer of unchanged objects and "
-                   "rebuilding changed ones in Rhino come in the next 0.4 steps; until then they are meshed "
-                   "(Houdini Convert respects the trims). Faces imported without trim data "
-                   "(rhino_trimmed_surfaces) are never exported as untrimmed surfaces."),
+              help="Trimmed NURBS faces (group rhino_trimmed_exact). Planar faces with one outer loop (no holes) "
+                   "are always written exactly as trimmed planes. The others are meshed for now (Houdini Convert "
+                   "respects the trims); exact transfer of unchanged Breps and rebuilding in Rhino come next. "
+                   "Faces imported without trim data (rhino_trimmed_surfaces) are never exported."),
         hou.FloatParmTemplate("meshlod", "Mesh Level of Detail", 1, default_value=(4.0,), min=0.5, max=32.0,
                               conditionals={HIDE: "{ trimmed != mesh }"},
                               help="Convert LOD for trimmed faces (divisions per span)."),
         _toggle("textdots", "Points with s@text to Text Dots", True),
         _toggle("points", "Other Points to Point Objects", True,
                 help="Points without primitives; several points with one rhino_id become a point cloud."),
-        hou.LabelParmTemplate("packed_note", "Packed", column_labels=(
-            "Packed primitives are unpacked (with their attributes); writing them as blocks comes in the next "
-            "0.4 step.",)),
+        _menu("packed", "Packed Primitives", [("blocks", "Blocks"), ("explode", "Explode to Objects")],
+              help="Blocks: packed primitives with their own geometry become block insertions (one definition per "
+                   "shared geometry, nested blocks too, full 4x4 transform in double precision, mirrored and "
+                   "non-uniformly scaled insertions included). Packed per Object of the import is always "
+                   "exploded. Explode: every part becomes its own object."),
     ]
     g.append(_folder("geo_f", "Geometry", ge))
 

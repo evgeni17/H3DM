@@ -115,26 +115,39 @@ def _verb(name, parms):
     return v
 
 
-def prepare_geometry(src, node, warn):
-    """Копия входа: packed раскрыты (с атрибутами), многоугольники > 4 сторон разбиты, обрезанные NURBS
-    и прочие примитивы — в полигоны. Служебные группы остаются для классификации."""
+def prepare_geometry(src, node, warn, keep_blocks=False):
+    """Копия входа: packed раскрыты (с атрибутами; при keep_blocks блоки остаются packed), многоугольники
+    > 4 сторон разбиты, обрезанные NURBS и прочие примитивы — в полигоны."""
     geo = hou.Geometry()
     geo.merge(src)
     unpacked = False
     for _ in range(16):
-        if not _has_packed(geo):
+        todo = [p for p in _packed_prims(geo) if not (keep_blocks and _is_block(geo, p))]
+        if not todo:
             break
-        _mark_packed(geo)
+        _mark_packed(geo, todo)
+        grp = geo.findPrimGroup("__h3dm_unpack") or geo.createPrimGroup("__h3dm_unpack")
+        grp.clear()
+        grp.add(todo)
         out = hou.Geometry()
-        _verb("unpack", {"transfer_attributes": "__h3dm_inst __h3dm_chain", "transfer_groups": "*",
-                         "limit_iterations": 1, "iterations": 1}).execute(out, [geo])
+        _verb("unpack", {"group": "__h3dm_unpack", "transfer_attributes": "__h3dm_inst __h3dm_chain",
+                         "transfer_groups": "*", "limit_iterations": 1, "iterations": 1}).execute(out, [geo])
         geo = out
+        g = geo.findPrimGroup("__h3dm_unpack")
+        if g is not None:
+            g.destroy()
         unpacked = True
     if unpacked:
         _finish_unpack(geo)
     _mark_free_points(geo)
     trimmed_mode = _p(node, "trimmed", "mesh")
+    # обрезанные плоские грани с одной (внешней) петлёй -> точная обрезанная плоскость (Brep без Rhino)
+    n_plane = _mark_trimmed_planes(geo)
     trim_grp = [g for g in (geo.findPrimGroup(n) for n in TRIM_GROUPS) if g is not None]
+    if n_plane:
+        tp = geo.findPrimGroup("__h3dm_tplane")
+        for g in trim_grp:
+            g.remove(tp.prims())
     n_trim = sum(len(g.prims()) for g in trim_grp)
     if n_trim:
         if trimmed_mode == "skip":
@@ -160,7 +173,7 @@ def prepare_geometry(src, node, warn):
         geo.deletePrims(tc.prims())
     # прочие типы (сферы, трубки, Bezier, metaball, polysoup ...) -> полигоны
     keep = (hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface)
-    other = [p for p in geo.prims() if p.type() not in keep]
+    other = [p for p in geo.prims() if p.type() not in keep and not (keep_blocks and _is_block(geo, p))]
     if other:
         tmp = geo.createPrimGroup("__h3dm_other")
         tmp.add(other)
@@ -189,6 +202,50 @@ _PACKED = tuple(t for t in (getattr(hou.primType, n, None) for n in
                              "PackedDiskSequence", "AgentShape")) if t is not None)
 
 
+def _plane_frame(P):
+    """Сетка 2x2 степени 1: (P00, P10, P01) при аффинной (плоской, параллелограммной) параметризации, иначе None."""
+    P00, P10, P01, P11 = P[0, 0], P[0, 1], P[1, 0], P[1, 1]
+    size = max(np.linalg.norm(P10 - P00), np.linalg.norm(P01 - P00), 1e-12)
+    if np.linalg.norm(P11 - P10 - P01 + P00) > 1e-6 * size:
+        return None
+    return P00, P10, P01
+
+
+def _mark_trimmed_planes(geo):
+    """Группа __h3dm_tplane: обрезанные грани (rhino_trimmed_exact) с одной петлёй на аффинной плоской
+    поверхности (степень 1, 2x2, без весов). rhino3dm строит их точно (Brep.CreateTrimmedPlane);
+    грани с отверстиями так не строятся (в rhino3dm нет многопетлевой обрезки)."""
+    import json
+    tg = geo.findPrimGroup(TRIM_GROUPS[0])
+    if tg is None or geo.findPrimAttrib("rhino_trim_loops") is None:
+        return 0
+    has_pw = geo.findPointAttrib("Pw") is not None
+    sel = []
+    for prim in tg.prims():
+        if prim.type() != hou.primType.NURBSSurface:
+            continue
+        if (int(prim.intrinsicValue("uorder")), int(prim.intrinsicValue("vorder")),
+                int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))) != (2, 2, 2, 2):
+            continue
+        try:
+            loops = json.loads(prim.attribValue("rhino_trim_loops") or "[]")
+        except Exception:
+            continue
+        if len(loops) != 1:
+            continue
+        pts = [[prim.vertex(u, v).point() for u in range(2)] for v in range(2)]
+        if has_pw and any(abs(p.attribValue("Pw") - 1.0) > 1e-9 for row in pts for p in row):
+            continue
+        P = np.array([[tuple(p.position()) for p in row] for row in pts], dtype=np.float64)
+        if _plane_frame(P) is None:
+            continue
+        sel.append(prim)
+    if sel:
+        g = geo.findPrimGroup("__h3dm_tplane") or geo.createPrimGroup("__h3dm_tplane")
+        g.add(sel)
+    return len(sel)
+
+
 def _mark_free_points(geo):
     """Точки без примитивов во входе (облака, точки, метки) помечаются ДО преобразований: Convert, удаление
     служебных примитивов и т.п. оставляют лишние точки, которые не должны стать объектами Rhino."""
@@ -202,14 +259,14 @@ def _mark_free_points(geo):
     geo.setPointIntAttribValuesFromString("__h3dm_free", (~used).astype(np.int32).tobytes())
 
 
-def _mark_packed(geo):
+def _mark_packed(geo, prims=None):
     """Перед раскрытием: на packed-примитивах — вставка верхнего уровня и цепочка вложенных вставок.
     Атрибуты самих частей (имя, слой, материал, User Text) остаются их собственными."""
     for nm in ("__h3dm_inst", "__h3dm_chain"):
         if geo.findPrimAttrib(nm) is None:
             geo.addAttrib(hou.attribType.Prim, nm, "")
     has_id = geo.findPrimAttrib("rhino_id") is not None
-    for p in _packed_prims(geo):
+    for p in (prims if prims is not None else _packed_prims(geo)):
         rid = p.attribValue("rhino_id") if has_id else ""
         inst = p.attribValue("__h3dm_inst")
         if inst:
@@ -244,6 +301,20 @@ def _finish_unpack(geo):
         a = geo.findPrimAttrib(nm)
         if a is not None:
             a.destroy()
+
+
+def _is_block(geo, prim):
+    """Packed-примитив пишется блоком, если у него есть своя геометрия и это не «Pack per Object» импорта
+    (у тех rhino_type — тип самого объекта Rhino)."""
+    if prim.type() not in _PACKED or not hasattr(prim, "getEmbeddedGeometry"):
+        return False
+    try:
+        if prim.getEmbeddedGeometry() is None:
+            return False
+    except Exception:
+        return False
+    rt = prim.attribValue("rhino_type") if geo.findPrimAttrib("rhino_type") is not None else ""
+    return rt in ("", "InstanceReference")
 
 
 def _packed_prims(geo):
@@ -320,6 +391,8 @@ class Plan(object):
         self.mat_props = {}
         self.doc_text = {}
         self.source_files = set()
+        self.definitions = {}    # geometryid -> {'name', 'objects'}
+        self.def_order = []      # вложенные определения раньше внешних
 
 
 def collect(node):
@@ -338,14 +411,18 @@ def collect(node):
         doc = _plain(src.dictAttribValue("rhino_doc") or {})
         tol = float(doc.get("abs_tolerance") or 0.001)
         plan.abs_tol = tol * float(doc.get("unit_m") or unit_m) / unit_m
-    for l in _detail_list(src, "rhino_layers"):
-        if l.get("full_path"):
-            plan.layer_order.append(l["full_path"])
-            plan.layer_props[l["full_path"]] = {"color": l.get("color"), "visible": l.get("visible", True),
-                                                "locked": l.get("locked", False), "user_text": l.get("user_text") or {}}
-    for m in _detail_list(src, "rhino_materials"):
+    mats = _detail_list(src, "rhino_materials")
+    for m in mats:
         if m.get("name"):
             plan.mat_props[m["name"]] = m
+    for l in _detail_list(src, "rhino_layers"):
+        if l.get("full_path"):
+            mi = l.get("material_index", -1)
+            mi = int(mi) if mi is not None else -1
+            plan.layer_order.append(l["full_path"])
+            plan.layer_props[l["full_path"]] = {"color": l.get("color"), "visible": l.get("visible", True),
+                                                "locked": l.get("locked", False), "user_text": l.get("user_text") or {},
+                                                "material": mats[mi].get("name", "") if 0 <= mi < len(mats) else ""}
     if src.findGlobalAttrib("rhino_doc_text") is not None and _p(node, "doctext", 1):
         plan.doc_text = {k: str(v) for k, v in (src.dictAttribValue("rhino_doc_text") or {}).items()}
     if src.findGlobalAttrib("rhino_file") is not None:
@@ -358,238 +435,324 @@ def collect(node):
         if sp:
             plan.source_files.add(os.path.abspath(sp))
 
-    geo = prepare_geometry(src, node, warn)
     maps, imp_sep = _name_maps(src)
     restore = bool(_p(node, "restorenames", 1))
     sep = _p(node, "layersep", "::") or "::"
     default_layer = _p(node, "defaultlayer", "Houdini") or "Houdini"
+    keep_blocks = _p(node, "packed", "blocks") == "blocks"
+    used_ids = set()
+    C, s_ = gx.C, gx.s
 
-    def to_file(P):
+    def to_world(P):
         """Позиции Houdini (N,3) -> координаты файла (double): один обратный трансформ + единицы."""
         return gx.to_rhino(np.asarray(P, dtype=np.float64)) * factor
 
-    prims = geo.prims()
-    n = len(prims)
-    layer_v = _str_attr(geo, _p(node, "layerattrib", "layer") or "layer", n)
-    name_v = _str_attr(geo, _p(node, "nameattrib", "name") or "name", n)
-    mat_attr = _p(node, "matattrib", "material") or "material"
-    mat_v = _str_attr(geo, mat_attr, n)
-    if not any(mat_v) and geo.findPrimAttrib("shop_materialpath") is not None:
-        mat_v = [os.path.basename(x) for x in geo.primStringAttribValues("shop_materialpath")]
-    rid_v = _str_attr(geo, "rhino_id", n)
-    inst_v = _str_attr(geo, "rhino_instance_id", n)
-    part_v = _str_attr(geo, "rhino_part_path", n)
-    cd = np.ones((n, 3))
-    if geo.findPrimAttrib("Cd") is not None:
-        cd = np.array(geo.primFloatAttribValues("Cd"), dtype=np.float64).reshape(n, 3)
-    alpha = np.ones(n)
-    if geo.findPrimAttrib("Alpha") is not None:
-        alpha = np.array(geo.primFloatAttribValues("Alpha"), dtype=np.float64)
-    utd = _p(node, "utdict", "user_text") or "user_text"
-    ut_dict_attr = geo.findPrimAttrib(utd)
-    # плоские атрибуты User Text: импортированные (карта ключей) + маски пользователя
-    ut_globs = _p(node, "utattribs", "")
-    flat = []
-    for a in geo.primAttribs():
-        nm = a.name()
-        if nm in SERVICE_ATTRIBS or nm.startswith(SERVICE_PREFIXES) or SERVICE_RE.match(nm) or nm == utd:
-            continue
-        if nm in maps["keys"] or (ut_globs and _globs_match(nm, ut_globs)):
-            flat.append(a)
-    # группы
-    grp_glob = _p(node, "groups", "* ^rhino_* ^h3dm_*")
-    groups = [g for g in geo.primGroups() if not g.name().startswith(SERVICE_GROUP_PREFIXES + ("__",))
-              and _globs_match(g.name(), grp_glob)]
-    prim_groups = [[] for _ in range(n)]
-    for g in groups:
-        orig = maps["groups"].get(g.name(), g.name()) if restore else g.name()
-        for p in g.prims():
-            prim_groups[p.number()].append(orig)
+    def to_local(P):
+        """Внутри определения блока: без origin (локальная система блока), оси/масштаб/единицы."""
+        return np.einsum("ji,nj->ni", C, np.asarray(P, dtype=np.float64).reshape(-1, 3)) / s_ * factor
 
-    def layer_path(i):
-        L = layer_v[i] or default_layer
-        if restore and L in maps["layers"]:
-            return maps["layers"][L]
-        return "::".join(s for s in L.split(sep if sep in L else imp_sep) if s) or default_layer
+    def instance_xform(prim, top):
+        """4x4 Rhino вставки: R = C^T A C, t = origin + C^T b / s (на верхнем уровне), всё в единицах файла."""
+        M = np.array(prim.fullTransform().asTupleOfTuples(), dtype=np.float64)
+        A, b = M[:3, :3].T, M[3, :3]
+        X = np.eye(4)
+        X[:3, :3] = C.T @ A @ C
+        t = C.T @ b / s_
+        X[:3, 3] = ((t + gx.origin) if top else t) * factor
+        # матрица импорта в double: Houdini хранит packed-трансформ во float32; если вставку не трогали
+        # (совпадает в пределах float32), пишем точную
+        try:
+            txt = prim.attribValue("rhino_xform") if prim.geometry().findPrimAttrib("rhino_xform") else ""
+        except Exception:
+            txt = ""
+        if txt:
+            Xs = np.array([float(v) for v in txt.split()], dtype=np.float64).reshape(4, 4)
+            Xs[:3, 3] *= factor
+            # допуск float32: относительно сдвинутого (локального) переноса, не абсолютных координат
+            tol_t = 1e-6 * (float(np.abs(t).max()) + 1.0) * factor
+            if np.abs(Xs[:3, :3] - X[:3, :3]).max() < 1e-5 and np.abs(Xs[:3, 3] - X[:3, 3]).max() < tol_t:
+                return Xs
+        return X
 
-    def obj_name(i):
-        nm = name_v[i]
-        return maps["names"].get(nm, nm) if restore else nm
+    def definition(prim, depth):
+        """Определение блока по geometryid packed-примитива (одно на общую геометрию; вложенные — раньше)."""
+        gid = prim.intrinsicValue("geometryid")
+        if gid in plan.definitions:
+            return gid
+        inner = prim.getEmbeddedGeometry()
+        objs = []
+        plan.definitions[gid] = None          # защита от зацикливания
+        if inner is not None and depth < 16:
+            gather(inner, to_local, objs, depth + 1)
+        bname = ""
+        if inner is not None and inner.findPrimAttrib("block") is not None:
+            bname = next((x for x in inner.primStringAttribValues("block") if x), "")
+        bname = bname or "Block_%d" % gid
+        used = {d["name"] for d in plan.definitions.values() if d}
+        base, k = bname, 2
+        while bname in used:
+            bname = "%s_%d" % (base, k)
+            k += 1
+        plan.definitions[gid] = {"name": bname, "objects": objs}
+        plan.def_order.append(gid)
+        return gid
 
-    def mat_name(i):
-        m = mat_v[i]
-        return maps["names"].get(m, m) if (restore and m) else m
+    def gather(geo_in, to_file, objects, depth):
+        top = depth == 0
+        geo = prepare_geometry(geo_in, node, warn, keep_blocks)
+        prims = geo.prims()
+        n = len(prims)
+        layer_v = _str_attr(geo, _p(node, "layerattrib", "layer") or "layer", n)
+        name_v = _str_attr(geo, _p(node, "nameattrib", "name") or "name", n)
+        mat_attr = _p(node, "matattrib", "material") or "material"
+        mat_v = _str_attr(geo, mat_attr, n)
+        if not any(mat_v) and geo.findPrimAttrib("shop_materialpath") is not None:
+            mat_v = [os.path.basename(x) for x in geo.primStringAttribValues("shop_materialpath")]
+        rid_v = _str_attr(geo, "rhino_id", n)
+        inst_v = _str_attr(geo, "rhino_instance_id", n)
+        part_v = _str_attr(geo, "rhino_part_path", n)
+        cd = np.ones((n, 3))
+        if geo.findPrimAttrib("Cd") is not None:
+            cd = np.array(geo.primFloatAttribValues("Cd"), dtype=np.float64).reshape(n, 3)
+        alpha = np.ones(n)
+        if geo.findPrimAttrib("Alpha") is not None:
+            alpha = np.array(geo.primFloatAttribValues("Alpha"), dtype=np.float64)
+        utd = _p(node, "utdict", "user_text") or "user_text"
+        ut_dict_attr = geo.findPrimAttrib(utd)
+        # плоские атрибуты User Text: импортированные (карта ключей) + маски пользователя
+        ut_globs = _p(node, "utattribs", "")
+        flat = []
+        for a in geo.primAttribs():
+            nm = a.name()
+            if nm in SERVICE_ATTRIBS or nm.startswith(SERVICE_PREFIXES) or SERVICE_RE.match(nm) or nm == utd:
+                continue
+            if nm in maps["keys"] or (ut_globs and _globs_match(nm, ut_globs)):
+                flat.append(a)
+        # группы
+        grp_glob = _p(node, "groups", "* ^rhino_* ^h3dm_*")
+        groups = [g for g in geo.primGroups() if not g.name().startswith(SERVICE_GROUP_PREFIXES + ("__",))
+                  and _globs_match(g.name(), grp_glob)]
+        prim_groups = [[] for _ in range(n)]
+        for g in groups:
+            orig = maps["groups"].get(g.name(), g.name()) if restore else g.name()
+            for p in g.prims():
+                prim_groups[p.number()].append(orig)
 
-    def user_text(i, prim):
-        d = {}
-        if ut_dict_attr is not None:
-            try:
-                d.update({str(k): _fmt_value(v) for k, v in (prim.attribValue(utd) or {}).items()})
-            except Exception:
-                pass
-        for a in flat:                         # плоские атрибуты — поверх словаря (их правят чаще)
-            v = prim.attribValue(a.name())
-            key = maps["keys"].get(a.name(), a.name()) if restore else a.name()
-            if key not in d and (v in ("", None) or (ut_dict_attr is not None and v == a.defaultValue())):
-                continue                       # у объекта такого ключа не было (атрибут со значением по умолчанию)
-            d[key] = _fmt_value(v)
-        return d
+        def layer_path(i):
+            L = layer_v[i] or default_layer
+            if restore and L in maps["layers"]:
+                return maps["layers"][L]
+            return "::".join(s for s in L.split(sep if sep in L else imp_sep) if s) or default_layer
 
-    # разбиение на объекты
-    split = _p(node, "splitby", "auto")
-    split_attr = _p(node, "splitattrib", "rhino_id") or "rhino_id"
-    piece = None
-    if split == "connectivity" or (split == "auto" and not all(rid_v)):
-        tmp = hou.Geometry()
-        _verb("connectivity", {"connecttype": 1, "attribname": "__h3dm_piece"}).execute(tmp, [geo])
-        piece = list(tmp.primIntAttribValues("__h3dm_piece")) if tmp.findPrimAttrib("__h3dm_piece") else None
-    split_vals = _str_attr(geo, split_attr, n) if split == "attrib" else None
+        def obj_name(i):
+            nm = name_v[i]
+            return maps["names"].get(nm, nm) if restore else nm
 
-    def key_of(i, prim):
-        if split == "prim" or prim.type() != hou.primType.Polygon or not prim.isClosed():
-            return ("prim", i)                 # кривые, поверхности: объект Rhino на примитив
-        if split == "attrib":
-            return ("a", split_vals[i] or ("piece", piece[i] if piece else i))
-        if split == "connectivity":
-            return ("c", piece[i] if piece else i)
-        # auto: объект Rhino (вставка + часть блока), иначе связная часть с тем же слоем/именем
-        if rid_v[i]:
-            return ("r", inst_v[i] or rid_v[i], part_v[i])
-        return ("c", piece[i] if piece else i, layer_v[i], name_v[i])
+        def mat_name(i):
+            m = mat_v[i]
+            return maps["names"].get(m, m) if (restore and m) else m
 
-    P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
-    has_ptcd = geo.findPointAttrib("Cd") is not None
-    ptcd = np.array(geo.pointFloatAttribValues("Cd"), dtype=np.float64).reshape(-1, 3) if has_ptcd else None
-    has_pw = geo.findPointAttrib("Pw") is not None
-    pw = np.array(geo.pointFloatAttribValues("Pw"), dtype=np.float64) if has_pw else None
+        def user_text(i, prim):
+            d = {}
+            if ut_dict_attr is not None:
+                try:
+                    d.update({str(k): _fmt_value(v) for k, v in (prim.attribValue(utd) or {}).items()})
+                except Exception:
+                    pass
+            for a in flat:                         # плоские атрибуты — поверх словаря (их правят чаще)
+                v = prim.attribValue(a.name())
+                key = maps["keys"].get(a.name(), a.name()) if restore else a.name()
+                if key not in d and (v in ("", None) or (ut_dict_attr is not None and v == a.defaultValue())):
+                    continue                       # у объекта такого ключа не было (атрибут со значением по умолчанию)
+                d[key] = _fmt_value(v)
+            return d
 
-    meshes = {}                                 # ключ -> {'first': i, 'faces': [[pt...]]}
-    order_keys = []
-    used_ids = set()
+        # разбиение на объекты
+        split = _p(node, "splitby", "auto")
+        split_attr = _p(node, "splitattrib", "rhino_id") or "rhino_id"
+        piece = None
+        if split == "connectivity" or (split == "auto" and not all(rid_v)):
+            tmp = hou.Geometry()
+            _verb("connectivity", {"connecttype": 1, "attribname": "__h3dm_piece"}).execute(tmp, [geo])
+            piece = list(tmp.primIntAttribValues("__h3dm_piece")) if tmp.findPrimAttrib("__h3dm_piece") else None
+        split_vals = _str_attr(geo, split_attr, n) if split == "attrib" else None
 
-    def attrs_of(i, prim, oid=None):
-        L = layer_path(i)
-        plan.layers.add(L)
-        m = mat_name(i)
-        if m:
-            plan.materials.add(m)
-        for g in prim_groups[i]:
-            plan.groups.add(g)
-        a = {"layer": L, "name": obj_name(i), "color": tuple(cd[i]) + (float(alpha[i]),) if _p(node, "color", 1) else None,
-             "material": m, "groups": prim_groups[i], "user_text": user_text(i, prim)}
-        # id объекта Rhino: сохраняем, если он ещё не занят (одна вставка = один объект)
-        cand = oid if oid is not None else (rid_v[i] if not inst_v[i] else "")
-        if cand and cand not in used_ids:
-            a["id"] = cand
-            used_ids.add(cand)
-        return a
+        def key_of(i, prim):
+            if split == "prim" or prim.type() != hou.primType.Polygon or not prim.isClosed():
+                return ("prim", i)                 # кривые, поверхности: объект Rhino на примитив
+            if split == "attrib":
+                return ("a", split_vals[i] or ("piece", piece[i] if piece else i))
+            if split == "connectivity":
+                return ("c", piece[i] if piece else i)
+            # auto: объект Rhino (вставка + часть блока), иначе связная часть с тем же слоем/именем
+            if rid_v[i]:
+                return ("r", inst_v[i] or rid_v[i], part_v[i])
+            return ("c", piece[i] if piece else i, layer_v[i], name_v[i])
 
-    POLY, NCURVE, NSURF = hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface
-    for i, prim in enumerate(prims):
-        t = prim.type()
-        if t == POLY:
-            pts = [v.point().number() for v in prim.vertices()]
-            if prim.isClosed():
-                if len(pts) < 3:
-                    continue
-                k = key_of(i, prim)
-                if k not in meshes:
-                    meshes[k] = {"first": i, "faces": []}
-                    order_keys.append(("mesh", k))
-                meshes[k]["faces"].append(pts)
-            else:
-                if len(pts) < 2:
-                    continue
-                order_keys.append(("obj", {"kind": "polyline", "geom": {"pts": to_file(P[pts]), "closed": False},
-                                           "attrs": attrs_of(i, prim)}))
-        elif t == NCURVE:
-            pts = [v.point().number() for v in prim.vertices()]
-            closed = bool(prim.intrinsicValue("closed"))
-            order_keys.append(("obj", {"kind": "curve", "geom": {
-                "cv": to_file(P[pts]), "w": pw[pts] if has_pw else np.ones(len(pts)),
-                "order": int(prim.intrinsicValue("order")), "knots": list(prim.intrinsicValue("knots")),
-                "closed": closed}, "attrs": attrs_of(i, prim)}))
-        elif t == NSURF:
-            nu, nv = int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))
-            idx = np.array([[prim.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)])
-            cv = to_file(P[idx.reshape(-1)]).reshape(nv, nu, 3)
-            w = pw[idx] if has_pw else np.ones((nv, nu))
-            # Houdini: нормаль противоположна Rhino (u x v) — разворачиваем U обратно (см. импорт)
-            ku = list(prim.intrinsicValue("uknots"))
-            a0, b0 = ku[0], ku[-1]
-            order_keys.append(("obj", {"kind": "surface", "geom": {
-                "cv": cv[:, ::-1], "w": w[:, ::-1], "order_u": int(prim.intrinsicValue("uorder")),
-                "order_v": int(prim.intrinsicValue("vorder")), "knots_u": [a0 + b0 - x for x in reversed(ku)],
-                "knots_v": list(prim.intrinsicValue("vknots")),
-                "wrap_u": bool(prim.intrinsicValue("uwrap")), "wrap_v": bool(prim.intrinsicValue("vwrap"))},
-                "attrs": attrs_of(i, prim)}))
+        P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
+        has_ptcd = geo.findPointAttrib("Cd") is not None
+        ptcd = np.array(geo.pointFloatAttribValues("Cd"), dtype=np.float64).reshape(-1, 3) if has_ptcd else None
+        has_pw = geo.findPointAttrib("Pw") is not None
+        pw = np.array(geo.pointFloatAttribValues("Pw"), dtype=np.float64) if has_pw else None
 
-    for kind, item in order_keys:
-        if kind == "obj":
-            plan.objects.append(item)
-            continue
-        mk = meshes[item]
-        first = mk["first"]
-        pts_all = sorted({p for fc in mk["faces"] for p in fc})
-        local = {p: j for j, p in enumerate(pts_all)}
-        faces = [tuple(local[p] for p in reversed(fc)) for fc in mk["faces"]]   # Houdini по часовой -> Rhino
-        colors = None
-        if has_ptcd:
-            c = ptcd[pts_all]
-            if len(c) and float(np.ptp(c, axis=0).max()) > 1e-6:
-                colors = c
-        plan.objects.append({"kind": "mesh", "geom": {"V": to_file(P[pts_all]), "faces": faces, "colors": colors},
-                             "attrs": attrs_of(first, prims[first])})
+        meshes = {}                                 # ключ -> {'first': i, 'faces': [[pt...]]}
+        order_keys = []
 
-    # точки без примитивов: текстовые метки и точки
-    free = []
-    if geo.findPointAttrib("__h3dm_free") is not None and (
-            (geo.findPointAttrib("text") is not None and _p(node, "textdots", 1)) or _p(node, "points", 0)):
-        flags = geo.pointIntAttribValues("__h3dm_free")
-        free = [pt for pt, fl in zip(geo.points(), flags) if fl]
-    if free:
-        has_text = geo.findPointAttrib("text") is not None
-        dots, others = [], []
-        for pt in free:
-            txt = pt.attribValue("text") if has_text else ""
-            (dots if (txt and _p(node, "textdots", 1)) else others).append(pt)
-        pt_attr = lambda name, pt, d="": pt.attribValue(name) if geo.findPointAttrib(name) else d  # noqa: E731
-        pflat = [a.name() for a in geo.pointAttribs()
-                 if not (a.name() in SERVICE_ATTRIBS or a.name().startswith(SERVICE_PREFIXES) or SERVICE_RE.match(a.name())
-                         or a.name() == utd) and (a.name() in maps["keys"] or (ut_globs and _globs_match(a.name(), ut_globs)))]
+        def attrs_of(i, prim, oid=None):
+            L = layer_path(i)
+            plan.layers.add(L)
+            m = mat_name(i)
+            if m:
+                plan.materials.add(m)
+            for g in prim_groups[i]:
+                plan.groups.add(g)
+            a = {"layer": L, "name": obj_name(i), "color": tuple(cd[i]) + (float(alpha[i]),) if _p(node, "color", 1) else None,
+                 "material": m, "groups": prim_groups[i], "user_text": user_text(i, prim)}
+            # id объекта Rhino: сохраняем, если он ещё не занят (одна вставка = один объект)
+            cand = oid if oid is not None else (rid_v[i] if not inst_v[i] else "")
+            if cand and cand not in used_ids:
+                a["id"] = cand
+                used_ids.add(cand)
+            return a
 
-        def pattrs(pt):
-            at = point_attrs(geo, pt, maps, restore, sep, imp_sep, default_layer, pflat, utd)
-            if not _p(node, "color", 1):
-                at["color"] = None
-            plan.layers.add(at["layer"])
-            if at["material"]:
-                plan.materials.add(at["material"])
-            return at
-        for pt in dots:
-            plan.objects.append({"kind": "textdot", "geom": {"text": pt.attribValue("text"),
-                                                             "pt": to_file([pt.position()])[0]}, "attrs": pattrs(pt)})
-        if others and _p(node, "points", 0):
-            byobj = {}
-            for pt in others:
-                byobj.setdefault(pt_attr("rhino_id", pt) or ("pt", pt.number()), []).append(pt)
-            for k, pts in byobj.items():
-                Pp = to_file([p.position() for p in pts])
-                attrs = pattrs(pts[0])
-                rid = pt_attr("rhino_id", pts[0])
-                if rid and rid not in used_ids:
-                    attrs["id"] = rid
-                    used_ids.add(rid)
-                if len(pts) == 1:
-                    plan.objects.append({"kind": "point", "geom": {"pt": Pp[0]}, "attrs": attrs})
+        POLY, NCURVE, NSURF = hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface
+        tpg = geo.findPrimGroup("__h3dm_tplane")
+        tplane = {p.number() for p in tpg.prims()} if tpg is not None else set()
+        for i, prim in enumerate(prims):
+            t = prim.type()
+            if t == POLY:
+                pts = [v.point().number() for v in prim.vertices()]
+                if prim.isClosed():
+                    if len(pts) < 3:
+                        continue
+                    k = key_of(i, prim)
+                    if k not in meshes:
+                        meshes[k] = {"first": i, "faces": []}
+                        order_keys.append(("mesh", k))
+                    meshes[k]["faces"].append(pts)
                 else:
-                    cols = np.array([p.attribValue("Cd") for p in pts]) if has_ptcd else None
-                    if cols is not None and float(np.ptp(cols, axis=0).max()) < 1e-6:
-                        cols = None
-                    plan.objects.append({"kind": "pointcloud", "geom": {"pts": Pp, "colors": cols}, "attrs": attrs})
+                    if len(pts) < 2:
+                        continue
+                    order_keys.append(("obj", {"kind": "polyline", "geom": {"pts": to_file(P[pts]), "closed": False},
+                                               "attrs": attrs_of(i, prim)}))
+            elif keep_blocks and _is_block(geo, prim):
+                gid = definition(prim, depth)
+                objects.append({"kind": "instance", "def": gid, "xform": instance_xform(prim, top),
+                                "attrs": attrs_of(i, prim, oid=rid_v[i] or None)})
+            elif t == NCURVE:
+                pts = [v.point().number() for v in prim.vertices()]
+                closed = bool(prim.intrinsicValue("closed"))
+                order_keys.append(("obj", {"kind": "curve", "geom": {
+                    "cv": to_file(P[pts]), "w": pw[pts] if has_pw else np.ones(len(pts)),
+                    "order": int(prim.intrinsicValue("order")), "knots": list(prim.intrinsicValue("knots")),
+                    "closed": closed}, "attrs": attrs_of(i, prim)}))
+            elif t == NSURF and i in tplane:
+                objects.append({"kind": "trimmed_plane", "geom": _trimmed_plane(prim, P, to_file),
+                                "attrs": attrs_of(i, prim)})
+            elif t == NSURF:
+                nu, nv = int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))
+                idx = np.array([[prim.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)])
+                cv = to_file(P[idx.reshape(-1)]).reshape(nv, nu, 3)
+                w = pw[idx] if has_pw else np.ones((nv, nu))
+                # Houdini: нормаль противоположна Rhino (u x v) — разворачиваем U обратно (см. импорт)
+                ku = list(prim.intrinsicValue("uknots"))
+                a0, b0 = ku[0], ku[-1]
+                order_keys.append(("obj", {"kind": "surface", "geom": {
+                    "cv": cv[:, ::-1], "w": w[:, ::-1], "order_u": int(prim.intrinsicValue("uorder")),
+                    "order_v": int(prim.intrinsicValue("vorder")), "knots_u": [a0 + b0 - x for x in reversed(ku)],
+                    "knots_v": list(prim.intrinsicValue("vknots")),
+                    "wrap_u": bool(prim.intrinsicValue("uwrap")), "wrap_v": bool(prim.intrinsicValue("vwrap"))},
+                    "attrs": attrs_of(i, prim)}))
+
+        for kind, item in order_keys:
+            if kind == "obj":
+                objects.append(item)
+                continue
+            mk = meshes[item]
+            first = mk["first"]
+            pts_all = sorted({p for fc in mk["faces"] for p in fc})
+            local = {p: j for j, p in enumerate(pts_all)}
+            faces = [tuple(local[p] for p in reversed(fc)) for fc in mk["faces"]]   # Houdini по часовой -> Rhino
+            colors = None
+            if has_ptcd:
+                c = ptcd[pts_all]
+                if len(c) and float(np.ptp(c, axis=0).max()) > 1e-6:
+                    colors = c
+            objects.append({"kind": "mesh", "geom": {"V": to_file(P[pts_all]), "faces": faces, "colors": colors},
+                                 "attrs": attrs_of(first, prims[first])})
+
+        # точки без примитивов: текстовые метки и точки
+        free = []
+        if geo.findPointAttrib("__h3dm_free") is not None and (
+                (geo.findPointAttrib("text") is not None and _p(node, "textdots", 1)) or _p(node, "points", 0)):
+            flags = geo.pointIntAttribValues("__h3dm_free")
+            free = [pt for pt, fl in zip(geo.points(), flags) if fl]
+        if free:
+            has_text = geo.findPointAttrib("text") is not None
+            dots, others = [], []
+            for pt in free:
+                txt = pt.attribValue("text") if has_text else ""
+                (dots if (txt and _p(node, "textdots", 1)) else others).append(pt)
+            pt_attr = lambda name, pt, d="": pt.attribValue(name) if geo.findPointAttrib(name) else d  # noqa: E731
+            pflat = [a.name() for a in geo.pointAttribs()
+                     if not (a.name() in SERVICE_ATTRIBS or a.name().startswith(SERVICE_PREFIXES) or SERVICE_RE.match(a.name())
+                             or a.name() == utd) and (a.name() in maps["keys"] or (ut_globs and _globs_match(a.name(), ut_globs)))]
+
+            def pattrs(pt):
+                at = point_attrs(geo, pt, maps, restore, sep, imp_sep, default_layer, pflat, utd)
+                if not _p(node, "color", 1):
+                    at["color"] = None
+                plan.layers.add(at["layer"])
+                if at["material"]:
+                    plan.materials.add(at["material"])
+                return at
+            for pt in dots:
+                objects.append({"kind": "textdot", "geom": {"text": pt.attribValue("text"),
+                                                                 "pt": to_file([pt.position()])[0]}, "attrs": pattrs(pt)})
+            if others and _p(node, "points", 0):
+                byobj = {}
+                for pt in others:
+                    byobj.setdefault(pt_attr("rhino_id", pt) or ("pt", pt.number()), []).append(pt)
+                for k, pts in byobj.items():
+                    Pp = to_file([p.position() for p in pts])
+                    attrs = pattrs(pts[0])
+                    rid = pt_attr("rhino_id", pts[0])
+                    if rid and rid not in used_ids:
+                        attrs["id"] = rid
+                        used_ids.add(rid)
+                    if len(pts) == 1:
+                        objects.append({"kind": "point", "geom": {"pt": Pp[0]}, "attrs": attrs})
+                    else:
+                        cols = np.array([p.attribValue("Cd") for p in pts]) if has_ptcd else None
+                        if cols is not None and float(np.ptp(cols, axis=0).max()) < 1e-6:
+                            cols = None
+                        objects.append({"kind": "pointcloud", "geom": {"pts": Pp, "colors": cols}, "attrs": attrs})
+    gather(src, to_world, plan.objects, 0)
     plan.gx = gx
     plan.factor = factor
     return plan
+
+
+def _trimmed_plane(prim, P, to_file):
+    """Плоская грань 2x2 + внешняя петля обрезки (UV Houdini) -> плоскость и 3D-кривые петли (точно, с весами):
+    параметризация аффинная, поэтому образы управляющих точек с теми же весами и узлами — та же кривая."""
+    import json
+    idx = np.array([[prim.vertex(u, v).point().number() for u in range(2)] for v in range(2)])
+    cv = to_file(P[idx.reshape(-1)]).reshape(2, 2, 3)[:, ::-1]           # разворот U, как у поверхностей
+    ku_h = list(prim.intrinsicValue("uknots"))
+    kv = list(prim.intrinsicValue("vknots"))
+    ku = [ku_h[0] + ku_h[-1] - x for x in reversed(ku_h)]
+    u0, u1, v0, v1 = ku[1], ku[2], kv[1], kv[2]
+    P00, P10, P01 = cv[0, 0], cv[0, 1], cv[1, 0]
+    loops = json.loads(prim.attribValue("rhino_trim_loops"))
+    curves = []
+    for c in loops[0]["c"]:
+        uvw = np.array(c["p"], dtype=np.float64)
+        ue = ku_h[0] + ku_h[-1] - uvw[:, 0]
+        X = (P00[None, :] + ((ue - u0) / (u1 - u0))[:, None] * (P10 - P00)[None, :]
+             + ((uvw[:, 1] - v0) / (v1 - v0))[:, None] * (P01 - P00)[None, :])
+        curves.append({"cv": X, "w": uvw[:, 2], "order": int(c["o"]), "knots": c["k"]})
+    return {"plane": (P00, P10 - P00, P01 - P00), "outer": curves}
 
 
 def point_attrs(geo, pt, maps, restore, sep, imp_sep, default_layer, flat_names, utd):
@@ -654,7 +817,8 @@ def write_plan(plan, path, node):
         for L in plan.layer_order:             # таблица слоёв импорта целиком, в исходном порядке
             w.layer(L)
     rules = _material_rules(node)
-    for o in plan.objects:
+
+    def write_object(o):
         a = o["attrs"]
         if layer_color and a.get("color") is not None and a["layer"] not in w.layer_props:
             w.layer_props[a["layer"]] = {"color": a["color"]}
@@ -666,7 +830,7 @@ def write_plan(plan, path, node):
                 break
         at = w.attributes(a["layer"], a.get("name", ""), a.get("color"), mname, a.get("groups", ()),
                           a.get("user_text"), a.get("id"), mcol, mtr)
-        g = o["geom"]
+        g = o.get("geom") or {}
         k = o["kind"]
         try:
             if k == "mesh":
@@ -678,14 +842,30 @@ def write_plan(plan, path, node):
             elif k == "surface":
                 w.add_surface(g["cv"], g["w"], g["order_u"], g["order_v"], g["knots_u"], g["knots_v"], at,
                               g.get("wrap_u", False), g.get("wrap_v", False))
+            elif k == "trimmed_plane":
+                w.add_trimmed_plane(g["plane"], g["outer"], at)
             elif k == "textdot":
                 w.add_textdot(g["text"], g["pt"], at)
             elif k == "point":
                 w.add_point(g["pt"], at)
             elif k == "pointcloud":
                 w.add_point_cloud(g["pts"], at, g.get("colors"))
+            elif k == "instance":
+                w.add_instance(o["def"], o["xform"], at)
         except Exception as ex:
             w.warnings.append("%s '%s' skipped: %s" % (k, a.get("name", ""), ex))
+
+    # определения блоков (вложенные раньше внешних), затем объекты модели
+    for gid in plan.def_order:
+        d = plan.definitions.get(gid)
+        if not d:
+            continue
+        w.begin_definition()
+        for o in d["objects"]:
+            write_object(o)
+        w.end_definition(gid, d["name"])
+    for o in plan.objects:
+        write_object(o)
     w.write(path, int(_p(node, "version", "8")))
     return w
 
@@ -709,7 +889,8 @@ def report_text(plan, path=None, writer=None, back=None):
     if path:
         lines.append("Written: %s" % path)
     lines.append("Objects: %d  (%s)" % (len(plan.objects), ", ".join("%s %d" % kv for kv in sorted(kinds.items()))))
-    lines.append("Layers: %d   Materials: %d   Groups: %d" % (len(plan.layers), len(plan.materials), len(plan.groups)))
+    lines.append("Layers: %d   Materials: %d   Groups: %d   Block definitions: %d"
+                 % (len(plan.layers), len(plan.materials), len(plan.groups), len([d for d in plan.definitions.values() if d])))
     lines.append("Units: %s   Transform: %s, origin %s, scale %g, %s"
                  % (plan.units, gx.source, " ".join("%.3f" % x for x in gx.origin), gx.s,
                     "Y-up -> Z-up" if gx.yup else "Z-up"))
@@ -744,8 +925,10 @@ def run(node, write=True):
     if _p(node, "verify", 1):
         from .rhino_write import summary
         back = summary(path)
-        if back["objects"] != len(plan.objects) - sum(1 for x in w.warnings if "skipped" in x):
-            w.warnings.append("read back: %d objects, expected %d" % (back["objects"], len(plan.objects)))
+        expected = len(plan.objects) + sum(len(d["objects"]) for d in plan.definitions.values() if d) \
+            - sum(1 for x in w.warnings if "skipped" in x)
+        if back["objects"] != expected:
+            w.warnings.append("read back: %d objects, expected %d" % (back["objects"], expected))
     return report_text(plan, path, w, back), path
 
 

@@ -25,6 +25,11 @@ def _r():
     return rhino3dm
 
 
+def layer_material_ok(material, layer_material, material_color=None):
+    """Материал объекта совпадает с материалом его слоя (и не задан таблицей ноды) -> «по слою»."""
+    return bool(material) and material == layer_material and material_color is None
+
+
 def _rgba255(c, a=1.0):
     """(r, g, b[, a]) 0..1 -> (r, g, b, a) 0..255."""
     c = list(c) + [a] * (4 - len(c))
@@ -48,6 +53,9 @@ class Writer(object):
         self.mat_props = mat_props or {}         # имя -> {'diffuse', 'transparency', ...}
         self.counts = {}
         self.warnings = []
+        self._sink = None            # при сборке определения блока объекты копятся здесь, а не в таблице
+        self._layer_materials = set()
+        self._defs = {}              # ключ определения -> id
 
     # ------------------------------------------------------------ таблицы
     def layer(self, path):
@@ -64,6 +72,11 @@ class Writer(object):
             pidx = self.layer(parent)
             L.ParentLayerId = self.f.Layers[pidx].Id
         p = self.layer_props.get(path) or {}
+        if p.get("material"):
+            try:
+                L.RenderMaterialIndex = self.material(p["material"])
+            except Exception:
+                pass
         if p.get("color"):
             L.Color = _rgba255(p["color"])
         if "visible" in p:
@@ -136,7 +149,13 @@ class Writer(object):
             else:
                 a.ColorSource = r.ObjectColorSource.ColorFromObject
                 a.ObjectColor = _rgba255(color)
-        if material:
+        lmat = (self.layer_props.get(layer or "Default") or {}).get("material") or ""
+        if layer_material_ok(material, lmat, material_color):
+            if lmat:
+                self.material(lmat)                 # материал слоя должен быть в таблице
+            self._layer_materials.add(layer or "Default")
+            a.MaterialSource = r.ObjectMaterialSource.MaterialFromLayer
+        elif material:
             a.MaterialIndex = self.material(material, material_color, material_transparency)
             a.MaterialSource = r.ObjectMaterialSource.MaterialFromObject
         for g in groups or ():
@@ -153,6 +172,47 @@ class Writer(object):
 
     def _count(self, kind):
         self.counts[kind] = self.counts.get(kind, 0) + 1
+
+    def _add(self, kind, geom, attrs, adder):
+        if self._sink is not None:
+            self._sink.append((geom, attrs))
+            self._count("block_" + kind)
+            return None
+        oid = adder(geom, attrs)
+        self._count(kind)
+        return oid
+
+    # ------------------------------------------------------------ блоки
+    def begin_definition(self):
+        self._sink = []
+
+    def end_definition(self, key, name, description=""):
+        """Записать собранные объекты как определение блока. -> id определения."""
+        r = _r()
+        items, self._sink = self._sink or [], None
+        geoms = tuple(g for g, _ in items)
+        attrs = tuple(a for _, a in items)
+        idx = self.f.InstanceDefinitions.Add(name, description, "", "", r.Point3d(0, 0, 0), geoms, attrs)
+        if idx is None or idx < 0:
+            self.warnings.append("block '%s' could not be written" % name)
+            return None
+        did = self.f.InstanceDefinitions[idx].Id
+        self._defs[key] = did
+        self._count("block_definition")
+        return did
+
+    def add_instance(self, key, xform, attrs):
+        """Вставка блока: xform — 4x4 (столбцовые векторы, единицы файла)."""
+        r = _r()
+        did = self._defs.get(key)
+        if did is None:
+            return None
+        t = r.Transform.Identity()
+        X = np.asarray(xform, dtype=np.float64).reshape(4, 4)
+        for i in range(4):
+            for j in range(4):
+                setattr(t, "M%d%d" % (i, j), float(X[i, j]))
+        return self._add("instance", r.InstanceReference(did, t), attrs, self.f.Objects.AddInstanceObject)
 
     # ------------------------------------------------------------ геометрия
     def add_mesh(self, V, faces, attrs, colors=None, normals=None):
@@ -190,9 +250,7 @@ class Writer(object):
                     nl.Add(*n)
             except Exception:
                 pass
-        oid = self.f.Objects.AddMesh(m, attrs)
-        self._count("mesh")
-        return oid
+        return self._add("mesh", m, attrs, self.f.Objects.AddMesh)
 
     def add_polyline(self, pts, closed, attrs):
         r = _r()
@@ -203,9 +261,7 @@ class Writer(object):
         for x, y, z in pts:
             pl.Add(x, y, z)
         crv = r.PolylineCurve(pl) if hasattr(r, "PolylineCurve") else pl.ToNurbsCurve()
-        oid = self.f.Objects.AddCurve(crv, attrs)
-        self._count("polyline")
-        return oid
+        return self._add("polyline", crv, attrs, self.f.Objects.AddCurve)
 
     @staticmethod
     def _rhino_knots(full):
@@ -236,9 +292,7 @@ class Writer(object):
         if not c.IsValid:
             self.warnings.append("invalid NURBS curve skipped")
             return None
-        oid = self.f.Objects.AddCurve(c, attrs)
-        self._count("curve")
-        return oid
+        return self._add("curve", c, attrs, self.f.Objects.AddCurve)
 
     def nurbs_surface(self, cv, w, order_u, order_v, knots_u_full, knots_v_full, wrap_u=False, wrap_v=False):
         """cv (nv, nu, 3) — строки по V, как вершины NURBMesh Houdini."""
@@ -275,21 +329,31 @@ class Writer(object):
         if b is None or not b.IsValid:
             self.warnings.append("invalid NURBS surface skipped")
             return None
-        oid = self.f.Objects.AddBrep(b, attrs)
-        self._count("surface")
-        return oid
+        return self._add("surface", b, attrs, self.f.Objects.AddBrep)
+
+    def add_trimmed_plane(self, plane, curves, attrs):
+        """plane = (начало, ось X, ось Y); curves — сегменты внешней петли {'cv','w','order','knots'}."""
+        r = _r()
+        o, x, y = [np.asarray(v, dtype=np.float64) for v in plane]
+        pl = r.Plane(r.Point3d(*o), r.Vector3d(*x), r.Vector3d(*y))
+        loop = r.PolyCurve()
+        for c in curves:
+            loop.Append(self.nurbs_curve(c["cv"], c["w"], c["order"], c["knots"]))
+        b = r.Brep.CreateTrimmedPlane(pl, loop)
+        if b is None or not b.IsValid:
+            self.warnings.append("trimmed planar face could not be built")
+            return None
+        return self._add("trimmed_plane", b, attrs, self.f.Objects.AddBrep)
 
     def add_textdot(self, text, pt, attrs):
         r = _r()
-        oid = self.f.Objects.AddTextDot(str(text), r.Point3d(*[float(x) for x in pt]), attrs)
-        self._count("textdot")
-        return oid
+        dot = r.TextDot(str(text), r.Point3d(*[float(x) for x in pt]))
+        return self._add("textdot", dot, attrs, lambda g, a: self.f.Objects.AddTextDot(g.Text, g.Point, a))
 
     def add_point(self, pt, attrs):
         r = _r()
-        oid = self.f.Objects.AddPoint(r.Point3d(*[float(x) for x in pt]), attrs)
-        self._count("point")
-        return oid
+        pnt = r.Point(r.Point3d(*[float(x) for x in pt]))
+        return self._add("point", pnt, attrs, lambda g, a: self.f.Objects.AddPoint(g.Location, a))
 
     def add_point_cloud(self, pts, attrs, colors=None):
         r = _r()
@@ -302,9 +366,7 @@ class Writer(object):
         else:
             for p in P:
                 pc.Add(r.Point3d(*p))
-        oid = self.f.Objects.AddPointCloud(pc, attrs)
-        self._count("pointcloud")
-        return oid
+        return self._add("pointcloud", pc, attrs, self.f.Objects.AddPointCloud)
 
     # ------------------------------------------------------------ запись
     def write(self, path, version=8):

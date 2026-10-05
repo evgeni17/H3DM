@@ -727,7 +727,7 @@ def run_export():
         src = os.path.join(FX, "h3dm_fixture_v001.3dm")
         imp.parm("file").set(src)
         imp.parm("geomode").set("mesh_curves")
-        text, path = export("attrs.3dm")
+        text, path = export("attrs.3dm", packed="explode")
         c = rt_compare.compare(src, path, tol=0.01, fields=("name", "layer", "ut", "mat", "groups", "box"))
         nbox = sum(1 for k in set(c["a"]["objects"]) & set(c["b"]["objects"]) if c["b"]["objects"][k][0]["box"])
         if c["diffs"] or c["common"] < 12 or nbox < 10:
@@ -739,6 +739,43 @@ def run_export():
         if len(parts) != 10 or any(p["layer"] != "Фасад::Окна" for p in parts) or \
                 {p["mat"] for p in parts if p["name"] == "Рама"} != {"Бетон"}:
             fails.append("export: block parts %s" % [(p["name"], p["layer"], p["mat"]) for p in parts][:4])
+        # 1б) блоки: определения (с вложенными), вставки с исходными матрицами (double), атрибуты вставок
+        ex.parm("packed").set("blocks")
+        text, path = export("blocks.3dm")
+        fa, fb = r.File3dm.Read(src), r.File3dm.Read(path)
+
+        def inserts(f):
+            out = {}
+            names = {str(d.Id): d.Name for d in f.InstanceDefinitions}
+            for o in f.Objects:
+                if "InstanceReference" in str(o.Geometry.ObjectType) and not o.Attributes.IsInstanceDefinitionObject:
+                    x = o.Geometry.Xform
+                    out[str(o.Attributes.Id)] = (names.get(str(o.Geometry.ParentIdefId)),
+                                                 [x.M00, x.M01, x.M02, x.M03, x.M10, x.M11, x.M12, x.M13,
+                                                  x.M20, x.M21, x.M22, x.M23])
+            return out
+        IA, IB = inserts(fa), inserts(fb)
+        if set(IA) != set(IB) or any(IA[k][0] != IB[k][0] or max(abs(a - b) for a, b in zip(IA[k][1], IB[k][1])) > 1e-9
+                                     for k in IA):
+            fails.append("export blocks: %s vs %s" % (sorted(IA.items())[:1], sorted(IB.items())[:1]))
+        defs_b = sorted(d.Name for d in fb.InstanceDefinitions)
+        if defs_b != sorted(d.Name for d in fa.InstanceDefinitions):
+            fails.append("export blocks: definitions %s" % defs_b)
+        c = rt_compare.compare(src, path, fields=("name", "layer", "ut", "mat", "groups"))
+        if c["diffs"]:
+            fails.append("export blocks attrs: %s" % [(k[:8], f_, a, b) for k, f_, a, b in c["diffs"]][:3])
+        # сдвинутая в Houdini вставка: матрица следует за правкой
+        xf = tmp.createNode("xform", "move_one")
+        xf.setInput(0, imp, 0)
+        xf.parm("group").set("@name=Okno_1")
+        xf.parmTuple("t").set((1.0, 0, 0))
+        ex.setInput(0, xf)
+        text, path = export("blocks_moved.3dm")
+        IM = inserts(r.File3dm.Read(path))
+        moved = [k for k in IA if abs(IM[k][1][3] - IA[k][1][3]) > 1e-6]
+        if len(moved) != 1 or abs(IM[moved[0]][1][3] - IA[moved[0]][1][3] - 1000.0) > 1e-3:
+            fails.append("export blocks moved: %s" % [(k[:8], IM[k][1][3] - IA[k][1][3]) for k in IA])
+        ex.setInput(0, imp, 0)
         # 2) точность NURBS-кривых и поверхностей, User Text облака
         src2 = os.path.join(FX, "h3dm_edgecases_v001.3dm")
         imp.parm("file").set(src2)
@@ -754,7 +791,8 @@ def run_export():
         imp.parm("file").set(src3)
         text, path = export("prepared.3dm")
         dev = rt_compare.shape_deviation(src3, path)
-        if dev["surfaces"] > 1e-3 or dev["n_surfaces"] < 70 or "trimmed NURBS faces written as meshes" not in text:
+        if dev["surfaces"] > 1e-3 or dev["n_surfaces"] < 15 or "trimmed_plane 2" not in text \
+                or "5 trimmed NURBS faces written as meshes" not in text:
             fails.append("export prepared: %s %s" % (dev, text[-200:]))
         # 3) далёкие координаты, единицы, источник трансформа
         f = r.File3dm.Read(src)

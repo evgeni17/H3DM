@@ -107,6 +107,12 @@ def _norm_points(geom, n=9):
     return np.array(out)
 
 
+def _is_trimmed_plane(brep):
+    """Обрезанная плоскость экспорта (CreateTrimmedPlane): плоская 2x2 степени 1, рёбер не 4."""
+    ns = brep.Faces[0].UnderlyingSurface().ToNurbsSurface()
+    return ns.OrderU == 2 and ns.OrderV == 2 and ns.Points.CountU == 2 and ns.Points.CountV == 2 and len(brep.Edges) != 4
+
+
 def shape_deviation(path_a, path_b):
     """Наибольшее расстояние между одноимёнными кривыми (по id) и между поверхностями граней
     (сопоставление по ближайшему габариту; U может быть развёрнут). -> {'curves': max, 'surfaces': max, 'n': ...}"""
@@ -128,7 +134,7 @@ def shape_deviation(path_a, path_b):
                     for t in reversed(xf):          # сначала внутренняя вставка, затем внешние
                         s.Transform(t)
                 faces_a.append(s)
-        elif k == "InstanceReference" and depth < 8:
+        elif k == "InstanceReference" and depth < 8:  # 99: определения не раскрываются
             d = idefs.get(str(g.ParentIdefId))
             if d is None:
                 return
@@ -138,8 +144,9 @@ def shape_deviation(path_a, path_b):
                 if ob is not None:
                     add_geom(ob.Geometry, x, depth + 1)
     for o in fa.Objects:
-        if not o.Attributes.IsInstanceDefinitionObject:
-            add_geom(o.Geometry, None)
+        # объекты определений — в своей локальной системе (экспорт блоков пишет их так же),
+        # вставки — раскрытые по своим матрицам (экспорт с Explode)
+        add_geom(o.Geometry, None, 0 if not o.Attributes.IsInstanceDefinitionObject else 99)
     srf, n_s = 0.0, 0
     for o in fb.Objects:
         g = o.Geometry
@@ -152,7 +159,8 @@ def shape_deviation(path_a, path_b):
             d = min(np.abs(pa - pb).max(), np.abs(pa - pb[::-1]).max())
             cur = max(cur, float(d))
             n_c += 1
-        elif k == "Brep" and len(g.Faces) == 1 and faces_a:
+        elif k == "Brep" and len(g.Faces) == 1 and faces_a and not _is_trimmed_plane(g):
+            # (обрезанные плоскости с иным числом рёбер сравниваются по площади в Rhino, не здесь)
             sb = g.Faces[0].UnderlyingSurface().ToNurbsSurface()
             pb = _norm_points(sb)
             best = None

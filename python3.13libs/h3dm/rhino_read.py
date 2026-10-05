@@ -763,6 +763,36 @@ def face_profile_loops(fdata, reverse, u_domain, tol, S=None):
     return loops
 
 
+def face_trim_loops_exact(fdata, reverse, u_domain, su=0.0, sv=0.0):
+    """Петли обрезки без упрощения: [[{'o': порядок, 'k': узлы (полные, Houdini), 'p': [[u, v, w], ...]}]]
+    в параметрах примитива Houdini (разворот U как у поверхности, сдвиг узлов su/sv как в houjson).
+    Первая петля — внешняя."""
+    from .nurbs import clamp_curve
+    a, b = u_domain
+    loops = []
+    for lp in sorted(fdata.get("l", []), key=lambda l: 0 if l.get("t") == "Outer" else 1):
+        curves = []
+        for c in lp.get("c", []):
+            order = int(c["o"])
+            cv = np.array([[q[0], q[1], 0.0] for q in c["p"]], dtype=np.float64)
+            w = np.array([q[2] if c.get("r") else 1.0 for q in c["p"]], dtype=np.float64)
+            cv, w, kn = clamp_curve(cv, w, _full_knots(c["k"]), order)
+            curves.append({"o": order, "k": [float(k) for k in kn],
+                           "p": [[float(x), float(y), float(ww)] for (x, y, _), ww in zip(cv, w)]})
+        if reverse:
+            rev = []
+            for c in reversed(curves):
+                k = c["k"]
+                k0, k1 = k[0], k[-1]
+                rev.append({"o": c["o"], "k": [k0 + k1 - x for x in reversed(k)],
+                            "p": [[a + b - u, v, ww] for u, v, ww in reversed(c["p"])]})
+            curves = rev
+        for c in curves:
+            c["p"] = [[u - su, v - sv, ww] for u, v, ww in c["p"]]
+        loops.append({"t": lp.get("t", ""), "c": curves})
+    return loops
+
+
 def _face_nurbs(face, fi, opt, trims, stats, untrimmed):
     """NURBS-грань: точная (необрезанная или с кривыми обрезки) либо None, если обрезки нет."""
     rev = houdini_reverse(face.OrientationIsReversed)
@@ -782,6 +812,11 @@ def _face_nurbs(face, fi, opt, trims, stats, untrimmed):
     if any(c.get("r") for lp in fdata.get("l", []) for c in lp.get("c", [])):
         S = surface_evaluator(nurbs_surface_data(srf, reverse=False))   # допуск — в пространстве модели
     d["trims"] = face_profile_loops(fdata, rev, (dom.T0, dom.T1), opt.trimtol, S)
+    # точные петли (с весами) в UV примитива Houdini — для экспорта (обрезанная плоскость, пересборка в Rhino)
+    import json
+    d["trim_loops"] = json.dumps(face_trim_loops_exact(fdata, rev, (dom.T0, dom.T1),
+                                                       float(d["knots_u"][0]), float(d["knots_v"][0])),
+                                 separators=(",", ":"))
     d["rhino_area"] = fdata.get("a")
     stats["trimmed_exact"] = stats.get("trimmed_exact", 0) + 1
     return d

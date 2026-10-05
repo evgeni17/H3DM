@@ -271,10 +271,15 @@ writing. The report (and the read-back check) is on the *Report* tab.
   for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
 * Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
 * NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini).
-* Trimmed NURBS faces (`rhino_trimmed_exact`): meshes for now (Houdini Convert respects the trims). Writing
-  unchanged Breps exactly and rebuilding changed ones in Rhino come in the next 0.4 steps.
+* Trimmed NURBS faces (`rhino_trimmed_exact`): planar faces with one outer loop (no holes) are written exactly
+  as trimmed planes (arcs stay arcs; the trim loop is kept from the import in `rhino_trim_loops`, so moving or
+  rotating the face is fine). Faces with holes and curved trimmed faces are meshes for now (Houdini Convert
+  respects the trims); exact transfer of unchanged Breps and rebuilding in Rhino come next.
 * Faces imported without trim data (`rhino_trimmed_surfaces`) are not exported: re-import after Prepare in Rhino.
-* Packed primitives are unpacked; each part becomes its own object (blocks come in the next 0.4 step).
+* Packed primitives (__Packed Primitives__ = *Blocks*): block definitions (one per shared geometry, nested blocks
+  too) and insertions with their full 4x4 transform; an insertion that was not moved keeps the exact double
+  matrix of the import (`rhino_xform`). *Pack per Object* of the import is always exploded. *Explode*: every part
+  is its own object.
 * Points without primitives: text dots (`s@text`), points or point clouds (one per `rhino_id`).
 
 @xform Coordinates and units
@@ -323,11 +328,15 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
   `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.
 * Открытые полигоны — полилинии. NURBS-кривые — точные NURBS (замкнутые кривые Houdini — периодические).
 * NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini).
-* Обрезанные NURBS-грани (`rhino_trimmed_exact`) пока пишутся сетками (Convert Houdini учитывает обрезку). Точный
-  перенос неизменённых Brep и пересборка изменённых в Rhino — следующие этапы 0.4.
+* Обрезанные NURBS-грани (`rhino_trimmed_exact`): плоские грани с одной внешней петлёй (без отверстий) пишутся
+  точно — обрезанной плоскостью (дуги остаются дугами; петля хранится с импорта в `rhino_trim_loops`, поэтому
+  перенос и поворот грани допустимы). Грани с отверстиями и криволинейные обрезанные — пока сетками (Convert
+  Houdini учитывает обрезку); точный перенос неизменённых Brep и пересборка в Rhino — следующие шаги.
 * Грани, импортированные без данных обрезки (`rhino_trimmed_surfaces`), не экспортируются: импортируйте файл
   после Prepare in Rhino.
-* Packed-примитивы раскрываются; каждая часть — свой объект (блоки — следующий этап 0.4).
+* Packed-примитивы (__Packed Primitives__ = *Blocks*): определения блоков (одно на общую геометрию, вложенные
+  тоже) и вставки с полной матрицей 4x4; несдвинутая вставка сохраняет точную матрицу импорта в double
+  (`rhino_xform`). *Pack per Object* импорта всегда раскрывается. *Explode* — каждая часть отдельным объектом.
 * Точки без примитивов: текстовые метки (`s@text`), точки или облака точек (одно на `rhino_id`).
 
 @xform Координаты и единицы
