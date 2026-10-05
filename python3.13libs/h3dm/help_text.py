@@ -32,7 +32,7 @@ Prepare in Rhino:
 Geometry Mode:
     *Mesh + NURBS Curves* (new nodes) — surfaces and solids as polygons (Rhino render meshes), curves as exact NURBS.
     *NURBS Surfaces + Mesh Solids* — open surfaces as NURBS, closed solids as polygons.
-    *All NURBS* — everything that has a NURBS form: curves, surfaces, trimmed faces as exact trimmed NURBS (prepared
+    *All NURBS* — everything that has a NURBS form: curves, surfaces, trimmed faces as trimmed NURBS (prepared
     files), SubD as NURBS (prepared files). Rhino meshes stay meshes with a warning. Without preparation trimmed
     faces become untrimmed NURBS + boundary curves (group `rhino_trimmed_surfaces`) and a warning names
     Prepare in Rhino.
@@ -42,9 +42,11 @@ Pack per Object:
 Type groups:
     Every output primitive is in exactly one of `h3dm_type_polygon`, `h3dm_type_nurbs_curve`,
     `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`, `h3dm_type_other` (real type after all conversions).
-    Exact trimmed faces are also in `rhino_trimmed_exact`.
+    Trimmed faces built from the prepared trim curves are also in `rhino_trimmed_exact` (non-rational trims
+    exact, rational ones within Trim Curve Tolerance).
 Trim Curve Tolerance:
-    Houdini ignores the weights of trim curves, so rational trims (arcs) become polylines within this deviation.
+    Houdini ignores the weights of trim curves, so rational trims (arcs) become polylines. The deviation is
+    measured on the surface in model units (not in UV), so it holds for stretched surfaces too.
     0 = 0.1 mm in model units.
 Skip Hidden / Skip Locked:
     Applied the same way to the Geometry and Info outputs and to objects inside blocks (an object on a hidden or
@@ -69,7 +71,8 @@ Create Layer Level Attributes:
 @attributes
 
 `s@layer` (full path with `::`), `s@name`, `v@Cd`, `f@Alpha`, `s@material`, `d@user_text`, `s@rhino_id`, `s@rhino_type`,
-`i@rhino_face`, `s@block`, `s@path` (`/layer/.../name`, compatible with HIFC), `s@LL0`, `s@LL1`, ... (layer levels). Rhino groups become primitive groups.
+`i@rhino_face`, `s@block`, `s@path` (`/layer/.../name`, compatible with HIFC), `s@LL0`, `s@LL1`, ... (layer levels). Expanded blocks: `s@rhino_id` is the insertion, `s@rhino_instance_id`, `s@rhino_object_id`,
+`s@rhino_part_path` (definition objects from the insertion down) and `s@rhino_block_path` tell its parts apart. Rhino groups become primitive groups.
 
 Detail: `d@rhino_doc` (units, tolerances, authors, earth anchor), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,
@@ -149,7 +152,7 @@ Prepare in Rhino:
 Geometry Mode:
     *Mesh + NURBS Curves* (новые ноды) — поверхности и тела полигонами (сетки отображения Rhino), кривые точными NURBS.
     *NURBS Surfaces + Mesh Solids* — открытые поверхности NURBS, замкнутые тела полигонами.
-    *All NURBS* — всё, что имеет NURBS-форму: кривые, поверхности, обрезанные грани — точными обрезанными NURBS
+    *All NURBS* — всё, что имеет NURBS-форму: кривые, поверхности, обрезанные грани — обрезанными NURBS
     (подготовленные файлы), SubD — NURBS (подготовленные файлы). Сетки Rhino остаются сетками с предупреждением.
     Без подготовки обрезанные грани приходят необрезанной NURBS + кривые границ (группа `rhino_trimmed_surfaces`),
     предупреждение предлагает Prepare in Rhino.
@@ -159,10 +162,11 @@ Pack per Object:
 Группы типов:
     Каждый примитив выхода входит ровно в одну из групп `h3dm_type_polygon`, `h3dm_type_nurbs_curve`,
     `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`, `h3dm_type_other` (фактический тип после всех
-    преобразований). Точные обрезанные грани — ещё и в `rhino_trimmed_exact`.
+    преобразований). Обрезанные грани по кривым из подготовки — ещё и в `rhino_trimmed_exact` (нерациональные кривые
+    точно, рациональные — в пределах Trim Curve Tolerance).
 Trim Curve Tolerance:
-    Houdini не учитывает веса кривых обрезки, поэтому рациональные кривые (дуги) становятся ломаными в пределах
-    этого отклонения. 0 = 0,1 мм в единицах модели.
+    Houdini не учитывает веса кривых обрезки, поэтому рациональные кривые (дуги) становятся ломаными. Отклонение
+    меряется на поверхности в единицах модели (не в UV) — допуск держится и на растянутых поверхностях. 0 = 0,1 мм в единицах модели.
 Skip Hidden / Skip Locked:
     Одинаково для выходов Geometry и Info и для объектов внутри блоков (объект на скрытом или заблокированном слое
     пропускается; объекты блока подчиняются своему слою, как в Rhino).
@@ -187,7 +191,8 @@ Create Layer Level Attributes:
 @attributes
 
 `s@layer` (полный путь через `::`), `s@name`, `v@Cd`, `f@Alpha`, `s@material`, `d@user_text`, `s@rhino_id`, `s@rhino_type`,
-`i@rhino_face`, `s@block`, `s@path` (`/слой/.../имя`, совместим с HIFC), `s@LL0`, `s@LL1`, ... (уровни слоя). Группы Rhino становятся группами примитивов.
+`i@rhino_face`, `s@block`, `s@path` (`/слой/.../имя`, совместим с HIFC), `s@LL0`, `s@LL1`, ... (уровни слоя). Раскрытые блоки: `s@rhino_id` — вставка; части различают `s@rhino_instance_id`, `s@rhino_object_id`,
+`s@rhino_part_path` (объекты определений от вставки вниз) и `s@rhino_block_path`. Группы Rhino становятся группами примитивов.
 
 Detail: `d@rhino_doc` (единицы, допуски, авторы, гео-привязка), `s@rhino_units`, `f@rhino_unit_m`,
 `d@rhino_doc_text` (Document User Text), `d[]@rhino_layers`, `d[]@rhino_materials`, `d[]@rhino_groups`,

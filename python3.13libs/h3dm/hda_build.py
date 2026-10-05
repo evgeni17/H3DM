@@ -70,7 +70,7 @@ def _import_ptg():
         ("all_nurbs", "All NURBS"), ("legacy", "Legacy (0.2 Surface Output)")], default=3,
         help="Mesh + NURBS Curves: surfaces and solids as meshes, curves as exact NURBS. "
              "NURBS Surfaces + Mesh Solids: open surfaces as NURBS, closed solids as meshes. "
-             "All NURBS: everything that has a NURBS form. Trimmed faces are exact trimmed NURBS when the file was "
+             "All NURBS: everything that has a NURBS form. Trimmed faces are trimmed NURBS when the file was "
              "prepared in Rhino (Prepare in Rhino), otherwise untrimmed NURBS + boundary curves with a warning. "
              "Legacy keeps the 0.2 behaviour of existing scenes; new nodes start with Mesh + NURBS Curves."))
     g.append(_toggle("pack", "Pack per Object", False, help="Each Rhino object becomes one packed primitive, "
@@ -92,7 +92,8 @@ def _import_ptg():
         _menu("curves", "Curves", [("nurbs", "NURBS Curves (exact)"), ("poly", "Polylines")]),
         hou.FloatParmTemplate("trimtol", "Trim Curve Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=10.0,
                               help="Rational trim curves (arcs) become polylines in Houdini (Houdini ignores trim curve "
-                                   "weights): maximum deviation. 0 = 0.1 mm in model units."),
+                                   "weights): maximum deviation, measured on the surface in model units. "
+                                   "0 = 0.1 mm in model units."),
         hou.FloatParmTemplate("curvetol", "Curve Tolerance (model units)", 1, default_value=(0.0,), min=0.0, max=100.0,
                               conditionals={HIDE: "{ curves == nurbs }"},
                               help="Maximum distance between a curve and its polyline. 0 = 1 mm in model units."),

@@ -154,6 +154,38 @@ for rev in (False, True):
     loops = rr.face_profile_loops(fd, rev, (0.0, 10.0), 0.01)
     check(_signed_area(loops[0]) > 0, "trim loop orientation after reverse=%s" % rev)
 
+# допуск обрезки — в пространстве модели (замечание проверки 0.3.0: 20,78 мм при 0,1 мм).
+# Плоскость S(u, v) = (1000u, 1000v, 0) мм, четверть окружности радиуса 0,4 в UV (рациональная, степень 2).
+import numpy as _np  # noqa: E402
+_r, _c = 0.4, 0.5
+_w = 2 ** -0.5
+quarter = [[_c + _r, _c, 1.0], [_c + _r, _c + _r, _w], [_c, _c + _r, 1.0]]
+plane = {"cv": _np.array([[[0, 0, 0], [1000, 0, 0]], [[0, 1000, 0], [1000, 1000, 0]]], dtype=float),
+         "w": _np.ones((2, 2)), "order_u": 2, "order_v": 2, "knots_u": [0, 0, 1, 1], "knots_v": [0, 0, 1, 1]}
+S = rr.surface_evaluator(plane)
+
+
+def _max_dev_mm(poly_uv):
+    """Наибольшее расстояние от точек дуги (в мм) до ломаной (плоскость линейна — ломаная прямая и в 3D)."""
+    P = _np.array([S(u, v) for u, v in poly_uv])
+    worst = 0.0
+    for t in _np.linspace(0.0, _np.pi / 2, 2001):
+        q = _np.array(S(_c + _r * _np.cos(t), _c + _r * _np.sin(t)))
+        best = 1e30
+        for a, b in zip(P[:-1], P[1:]):
+            ab = b - a
+            s_ = min(max(float((q - a) @ ab) / float(ab @ ab), 0.0), 1.0)
+            best = min(best, float(_np.linalg.norm(q - (a + s_ * ab))))
+        worst = max(worst, best)
+    return worst
+
+
+for tol in (0.1, 0.01):
+    pts = rr._sample_trim(quarter, [0, 0, 1, 1], 3, tol, S)
+    dev = _max_dev_mm(pts)
+    check(dev <= tol * 1.0001, "trim tolerance in model space: tol %g mm -> %.4f mm (%d points)" % (tol, dev, len(pts)))
+check(_max_dev_mm(rr._sample_trim(quarter, [0, 0, 1, 1], 3, 0.1)) > 1.0, "UV-only sampling must be coarser")
+
 if FAIL:
     print("FAILED (%d):" % len(FAIL))
     for x in FAIL:

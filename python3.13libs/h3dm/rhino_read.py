@@ -665,8 +665,27 @@ def brep_trims(brep):
     return {f["f"]: f for f in d.get("faces", [])}
 
 
-def _sample_trim(cv, knots, order, tol):
-    """Рациональная кривая обрезки -> точки ломаной (u, v) с отклонением хорды <= tol (в единицах параметра)."""
+def surface_evaluator(d):
+    """Данные поверхности (nurbs_surface_data, без разворота) -> S(u, v) в координатах модели."""
+    from .nurbs import eval_surface
+    cv, w = np.asarray(d["cv"], dtype=np.float64), np.asarray(d["w"], dtype=np.float64)
+    Uu, Uv = np.asarray(d["knots_u"], dtype=np.float64), np.asarray(d["knots_v"], dtype=np.float64)
+    ou, ov = int(d["order_u"]), int(d["order_v"])
+    u0, u1 = float(Uu[ou - 1]), float(Uu[len(Uu) - ou])
+    v0, v1 = float(Uv[ov - 1]), float(Uv[len(Uv) - ov])
+
+    def S(u, v):
+        return eval_surface(cv, w, Uu, Uv, ou, ov, min(max(u, u0), u1), min(max(v, v0), v1))
+    return S
+
+
+def _sample_trim(cv, knots, order, tol, S=None):
+    """Рациональная кривая обрезки -> точки ломаной (u, v).
+
+    S — поверхность грани S(u, v): отклонение меряется в ПРОСТРАНСТВЕ МОДЕЛИ — расстояние между точкой
+    поверхности на кривой и точкой поверхности на хорде в UV (в 1/4, 1/2, 3/4 каждого участка). Без S —
+    в единицах параметра (только для тестов). Хорда делится, пока отклонение > tol (до 2^16 частей).
+    """
     from .nurbs import eval_curve
     P = np.array([[p[0], p[1], 0.0] for p in cv], dtype=np.float64)
     W = np.array([p[2] for p in cv], dtype=np.float64)
@@ -679,16 +698,27 @@ def _sample_trim(cv, knots, order, tol):
     ts.append(b)
     pt = {t: eval_curve(P, W, U, order, t)[:2] for t in ts}
 
-    def refine(ta, tb, depth):
-        tm = 0.5 * (ta + tb)
-        pm = eval_curve(P, W, U, order, tm)[:2]
-        pa, pb = pt[ta], pt[tb]
+    def deviation(pa, pb, pm):
         ab = pb - pa
-        L = float(np.hypot(*ab))
-        dev = float(np.hypot(*(pm - pa))) if L == 0 else abs(float(ab[0] * (pm - pa)[1] - ab[1] * (pm - pa)[0])) / L
-        if dev <= tol or depth >= 12:
+        L2 = float(ab @ ab)
+        s = 0.0 if L2 == 0 else min(max(float((pm - pa) @ ab) / L2, 0.0), 1.0)
+        q = pa + s * ab                       # ближайшая к кривой точка хорды в UV
+        if S is None:
+            return float(np.hypot(*(pm - q)))
+        return float(np.linalg.norm(S(*pm) - S(*q)))
+
+    def refine(ta, tb, depth):
+        pa, pb = pt[ta], pt[tb]
+        dev = 0.0
+        for f in (0.25, 0.5, 0.75):
+            tm = ta + f * (tb - ta)
+            dev = max(dev, deviation(pa, pb, eval_curve(P, W, U, order, tm)[:2]))
+            if dev > tol:
+                break
+        if dev <= tol or depth >= 16:
             return [tb]
-        pt[tm] = pm
+        tm = 0.5 * (ta + tb)
+        pt[tm] = eval_curve(P, W, U, order, tm)[:2]
         return refine(ta, tm, depth + 1) + refine(tm, tb, depth + 1)
 
     out = [ts[0]]
@@ -697,10 +727,11 @@ def _sample_trim(cv, knots, order, tol):
     return [pt[t] for t in out]
 
 
-def face_profile_loops(fdata, reverse, u_domain, tol):
+def face_profile_loops(fdata, reverse, u_domain, tol, S=None):
     """Петли кривых обрезки грани -> [[{'order','knots'(полные),'cv'[(u,v)]}...]...] в UV Houdini.
 
-    Рациональные кривые -> ломаные (Houdini не учитывает веса кривых обрезки); остальные — точно.
+    Рациональные кривые -> ломаные с отклонением <= tol в пространстве модели (S — поверхность грани;
+    Houdini не учитывает веса кривых обрезки); нерациональные — точно.
     reverse: U поверхности развёрнут (u' = a + b - u) — отражаем точки и меняем направление обхода петли.
     """
     from .nurbs import clamp_curve
@@ -711,7 +742,7 @@ def face_profile_loops(fdata, reverse, u_domain, tol):
         for c in lp.get("c", []):
             order = int(c["o"])
             if c.get("r"):
-                pts = _sample_trim(c["p"], c["k"], order, tol)
+                pts = _sample_trim(c["p"], c["k"], order, tol, S)
                 n = len(pts)
                 kn = [0.0] + list(np.linspace(0.0, 1.0, n)) + [1.0]
                 curves.append({"order": 2, "knots": kn, "cv": [(float(x), float(y)) for x, y in pts]})
@@ -747,7 +778,10 @@ def _face_nurbs(face, fi, opt, trims, stats, untrimmed):
         return None
     ns = srf.ToNurbsSurface()
     dom = ns.Domain(0)
-    d["trims"] = face_profile_loops(fdata, rev, (dom.T0, dom.T1), opt.trimtol)
+    S = None
+    if any(c.get("r") for lp in fdata.get("l", []) for c in lp.get("c", [])):
+        S = surface_evaluator(nurbs_surface_data(srf, reverse=False))   # допуск — в пространстве модели
+    d["trims"] = face_profile_loops(fdata, rev, (dom.T0, dom.T1), opt.trimtol, S)
     d["rhino_area"] = fdata.get("a")
     stats["trimmed_exact"] = stats.get("trimmed_exact", 0) + 1
     return d

@@ -2,9 +2,9 @@
 
 H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It uses
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
-*Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for exact trimmed NURBS.
+*Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for trimmed NURBS surfaces.
 
-> **Status: 0.3.1 — import works, export is in development.** Geometry modes (meshes, NURBS, exact trimmed NURBS),
+> **Status: 0.3.2 — import works, export is in development.** Geometry modes (meshes, NURBS, trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 
@@ -24,13 +24,14 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 | points of the *Info* output | text dots, texts, dimensions, leaders, named points, lights, block insertion points |
 
 * **Geometry modes:** *Mesh + NURBS Curves* (default) — surfaces and solids as Rhino render meshes, curves as exact
-  NURBS; *NURBS Surfaces + Mesh Solids*; *All NURBS* — curves, surfaces, trimmed faces as exact trimmed NURBS and
-  SubD as NURBS. *Pack per Object* works with every mode. Every primitive is in one type group
+  NURBS; *NURBS Surfaces + Mesh Solids*; *All NURBS* — curves, surfaces, trimmed faces as trimmed NURBS and
+  SubD as NURBS. Trim curves are exact when they are non-rational; rational ones (arcs) become polylines
+  within *Trim Curve Tolerance* measured on the surface in model units (Houdini ignores trim weights). *Pack per Object* works with every mode. Every primitive is in one type group
   (`h3dm_type_polygon`, `h3dm_type_nurbs_curve`, `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`,
   `h3dm_type_other`).
 * **NURBS:** Brep faces become Houdini NURBS surfaces with the exact degree, knots and weights. Export writes NURBS
   surfaces untrimmed, with their boundary curves next to them.
-* **Files without render meshes, exact trims, SubD:** rhino3dm cannot tessellate and does not expose trim curves.
+* **Files without render meshes, trims, SubD:** rhino3dm cannot tessellate and does not expose trim curves.
   The **Prepare in Rhino** button sends the file to a running Rhino 8: it meshes every face, stores the 2D trim
   curves, converts SubD to NURBS and writes `<name>_h3dm_v###.3dm` next to the source; the node then switches to it.
   Without it, trimmed faces without a mesh are skipped and All NURBS gives untrimmed surfaces + boundary curves,
@@ -85,7 +86,7 @@ tests/                  fixtures made in Rhino 8, unit and Houdini tests
 |---|---|
 | 0.1 ✓ | package, menu, shelf, installer, HDAs, document data and tables, File Info |
 | 0.2 ✓ | import: NURBS, meshes, curves, points, blocks, attributes, Cyrillic names, *Info* output, global transform |
-| 0.3 ✓ | geometry modes, exact trimmed NURBS, Prepare in Rhino, type groups, strict Xform input, disk cache, speed |
+| 0.3 ✓ | geometry modes, trimmed NURBS, Prepare in Rhino, type groups, strict Xform input, disk cache, speed |
 | 0.4 | export of everything above |
 | 0.5 | tests, documentation, first public release |
 

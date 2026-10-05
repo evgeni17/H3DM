@@ -448,6 +448,13 @@ def run_prepare():
         bad = os.path.join(d, "битый.3dm")
         with open(bad, "wb") as fh:
             fh.write(b"not a 3dm" * 50)
+        # неполная подготовка: статус partial, копия не переиспользуется
+        rp = rb.wait(rb.submit(src, {"preset": "coarse", "test_skip_mesh": 1}, inst[0]["id"]), 120)
+        if rp.get("status") != "partial" or not rp.get("missing") or not rp["stats"].get("faces_without_mesh"):
+            fails.append("prepare partial: %s" % {k: rp.get(k) for k in ("status", "error")})
+        rp2 = rb.wait(rb.submit(src, {"preset": "coarse", "test_skip_mesh": 1}, inst[0]["id"]), 120)
+        if rp2.get("status") == "skipped":
+            fails.append("prepare partial: incomplete copy was reused")
         try:
             rb.submit(bad, {}, inst[0]["id"])
             fails.append("prepare: non-3dm file accepted")
@@ -587,4 +594,51 @@ def run_layer_levels():
     return fails
 
 
-result = run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
+def run_block_ids():
+    """Раскрытые блоки: части одной вставки (общий rhino_id) различимы по rhino_instance_id + rhino_part_path."""
+    import collections
+    fails = []
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_blk")
+    try:
+        n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("file").set(os.path.join(FX, "h3dm_fixture_v001.3dm"))
+        n.parm("diskcache").set(0)
+        n.parm("blocks").set("expand")
+        for pack in (0, 1):
+            n.parm("pack").set(pack)
+            g = n.geometry(0)
+            if g.findPrimAttrib("rhino_instance_id") is None:
+                fails.append("block ids: no rhino_instance_id (pack=%d)" % pack)
+                continue
+            by_key = collections.defaultdict(set)
+            by_id = collections.defaultdict(set)
+            for pr in g.prims():
+                inst = pr.attribValue("rhino_instance_id")
+                if not inst:
+                    continue
+                key = (inst, pr.attribValue("rhino_part_path"))
+                look = (pr.attribValue("name"), pr.attribValue("material") if g.findPrimAttrib("material") else "")
+                by_key[key].add(look)
+                by_id[pr.attribValue("rhino_id")].add(key)
+                if pr.attribValue("rhino_id") != inst or not pr.attribValue("rhino_object_id"):
+                    fails.append("block ids: rhino_id/object id %s" % (key,))
+                    break
+            if not by_key:
+                fails.append("block ids: no expanded parts (pack=%d)" % pack)
+            if any(len(v) > 1 for v in by_key.values()):
+                fails.append("block ids: one key, different objects %s" % [v for v in by_key.values() if len(v) > 1][:2])
+            if not any(len(v) > 1 for v in by_id.values()):
+                fails.append("block ids: test needs an insertion with several parts")
+        n.parm("blocks").set("packed")
+        n.parm("pack").set(0)
+        g = n.geometry(0)
+        if g.findPrimAttrib("rhino_instance_id") is not None:
+            fails.append("block ids: written without expanded blocks")
+    finally:
+        tmp.destroy()
+    print("houdini_regression block ids: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
+          + run_block_ids())

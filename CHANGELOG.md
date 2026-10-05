@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.3.2 — 2026-10-05
+Fixes from the review of 0.3.0 (export 0.4 preconditions).
+* **Trim Curve Tolerance in model space.** Rational trims were sampled by their deviation in UV, so a stretched
+  surface (1000 mm per UV unit) gave 20.78 mm instead of 0.1 mm. The deviation is now measured on the surface
+  (surface point on the curve vs. on the UV chord, at 1/4, 1/2, 3/4 of each segment); test: 0.1 and 0.01 mm hold
+  on that surface. Docs no longer call these faces "exact": non-rational trims are exact, rational ones are
+  polylines within the tolerance.
+* **Prepare: partial result.** Faces left without a render mesh (or meshing failures) give the status `partial`:
+  the node gets the copy with a warning listing the objects, and such a copy is not reused on the next press.
+* **Expanded blocks:** parts of one insertion share `rhino_id` (the insertion), so they also get
+  `s@rhino_instance_id`, `s@rhino_object_id`, `s@rhino_part_path` (chain of definition objects, unique even for
+  nested repeats) and `s@rhino_block_path` — the key for splitting objects on export.
+
 ## 0.3.1 — 2026-10-05
 Prepare in Rhino on a real model (123 MB, 114 Breps, 3873 faces) took 9 minutes and looked frozen.
 * **35× faster preparation:** the face areas (`AreaMassProperties`, used only by the tests) took 507 of 527 s.

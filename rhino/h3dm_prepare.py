@@ -214,7 +214,7 @@ def prepare(src, settings=None, log=print, progress=None):
     vers = versions(src)
     if vers and not settings.get("force"):
         stamp = read_stamp(vers[-1][1])
-        if stamp and stamp.get("key") == key:
+        if stamp and stamp.get("key") == key and stamp.get("complete", True):
             return {"status": "skipped", "output": vers[-1][1], "reason": "up to date", "elapsed": time.time() - t0}
 
     if not is_3dm(src):
@@ -264,13 +264,29 @@ def prepare(src, settings=None, log=print, progress=None):
                 stats["meshes_kept"] += 1
                 continue
             if isinstance(o.Geometry, (G.Brep, G.Extrusion, G.SubD, G.Surface)):
+                if k < int(settings.get("test_skip_mesh", 0)):
+                    continue                      # только для тестов: имитация граней без сетки
                 try:
                     n = o.CreateMeshes(G.MeshType.Render, mp, False)
                     stats["meshed" if n > 0 else "mesh_failed"] += 1
                 except Exception:
                     stats["mesh_failed"] += 1
-        # 4) отпечаток
-        stamp = {"key": key, "source": fp, "mesh": mp_summary(mp), "stats": stats,
+        # 3а) покрытие: у каждой грани Brep должна быть сетка отображения
+        missing = []
+        for o in targets:
+            g = o.Geometry
+            if isinstance(g, G.Brep):
+                k = sum(1 for fi in range(g.Faces.Count) if g.Faces[fi].GetMesh(G.MeshType.Render) is None)
+                if k:
+                    missing.append({"id": str(o.Id), "name": o.Attributes.Name or "",
+                                    "layer": doc.Layers[o.Attributes.LayerIndex].FullPath
+                                    if 0 <= o.Attributes.LayerIndex < doc.Layers.Count else "",
+                                    "faces": k})
+        stats["objects_without_mesh"] = len(missing)
+        stats["faces_without_mesh"] = sum(m["faces"] for m in missing)
+        complete = not missing and not stats["mesh_failed"]
+        # 4) отпечаток (неполная копия не переиспользуется при повторе)
+        stamp = {"key": key, "source": fp, "mesh": mp_summary(mp), "stats": stats, "complete": complete,
                  "created": time.strftime("%Y-%m-%d %H:%M:%S")}
         doc.Strings.SetString("h3dm.prepare", json.dumps(stamp))
         # 5) атомарная запись новой версии
@@ -307,7 +323,12 @@ def prepare(src, settings=None, log=print, progress=None):
                 faces += 1
                 meshed += g.Faces[fi].GetMesh(G.MeshType.Render) is not None
     stats["check_faces"], stats["check_faces_meshed"] = faces, meshed
-    return {"status": "ok", "output": out, "stats": stats, "elapsed": time.time() - t0, "rhino": rhino_ver}
+    complete = complete and faces == meshed
+    res = {"status": "ok" if complete else "partial", "output": out, "stats": stats,
+           "elapsed": time.time() - t0, "rhino": rhino_ver}
+    if not complete:
+        res["missing"] = missing[:50]
+    return res
 
 
 def _progress_writer(job_path):

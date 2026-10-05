@@ -85,7 +85,7 @@ def apply_result(node, res, file_raw, src):
     """Обновить ноду по результату. -> текст для пользователя."""
     status = res.get("status")
     out = res.get("output")
-    if status in ("ok", "skipped") and out:
+    if status in ("ok", "skipped", "partial") and out:
         cur = node.parm("file").unexpandedString()
         if cur != file_raw:
             return ("Prepared copy: %s\n3dm File was changed while Rhino was working, so it was left as is."
@@ -94,6 +94,12 @@ def apply_result(node, res, file_raw, src):
         if status == "skipped":
             return "Up to date: %s (same source and settings, reused)." % os.path.basename(out)
         stt = res.get("stats") or {}
+        if status == "partial":
+            return ("PARTIAL: %s — %s of %s faces have no render mesh (%s objects, mesh failures %s). These faces "
+                    "are skipped in Mesh modes. Check the objects in Rhino (bad geometry?) or try another mesh "
+                    "preset; the copy is not reused, the next press prepares again."
+                    % (os.path.basename(out), stt.get("faces_without_mesh", "?"), stt.get("check_faces", "?"),
+                       stt.get("objects_without_mesh", "?"), stt.get("mesh_failed", 0)))
         return ("Prepared in %.1f s: %s\nFaces meshed %s / %s, SubD converted %s."
                 % (res.get("elapsed") or 0, os.path.basename(out), stt.get("check_faces_meshed", "?"),
                    stt.get("check_faces", "?"), stt.get("subd_converted", 0)))
@@ -125,6 +131,16 @@ def _finish(jid, res):
                  "waiting for an answer, or the file is very large (raise Timeout on the Prepare tab). Rhino may "
                  "still write the copy next to the source — press Prepare in Rhino again later to pick it up."
                  % timeout, hou.severityType.Warning)
+        return
+    if status == "partial":
+        if node is not None:
+            text = apply_result(node, res, file_raw, state["source"])
+        else:
+            text = "Prepared copy (partial): %s" % res.get("output")
+        miss = res.get("missing") or []
+        details = "\n".join("%s  %s  layer %s  faces without mesh: %s" % (m.get("id"), m.get("name"), m.get("layer"),
+                                                                         m.get("faces")) for m in miss)
+        _message(text, hou.severityType.Warning, details=details or None)
         return
     if status in ("ok", "skipped"):
         if node is not None:

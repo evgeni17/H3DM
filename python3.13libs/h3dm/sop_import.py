@@ -36,7 +36,8 @@ TYPE_GROUPS = {"Poly": "h3dm_type_polygon", "NURBCurve": "h3dm_type_nurbs_curve"
                "NURBMesh": "h3dm_type_nurbs_surface", "PackedGeometry": "h3dm_type_packed_geometry"}
 TYPE_OTHER = "h3dm_type_other"
 RESERVED = {"P", "Pw", "N", "Cd", "Alpha", "uv", "v", "id", "name", "layer", "path", "material", "user_text",
-            "rhino_id", "rhino_type", "rhino_face", "block", "layer_orig", "name_orig", "transform", "orient",
+            "rhino_id", "rhino_type", "rhino_face", "block", "rhino_instance_id", "rhino_object_id",
+            "rhino_part_path", "rhino_block_path", "layer_orig", "name_orig", "transform", "orient",
             "pscale", "scale", "up", "text", "type"}
 # id — частый ключ User Text; он не конфликтует с геометрией Houdini, но имя «id» у точек занято системой частиц
 RESERVED_UT = RESERVED - {"id"}
@@ -929,7 +930,11 @@ def _expand_instance(p, parent, add_record, ctx, depth=0):
     d = ctx.tables.idefs.get(p["idef"])
     for rec in rhino_read.block_definition(ctx.f, ctx.tables, p["idef"], ctx.opt, ctx.stats, ctx.block_cache):
         rec2 = rhino_read.apply_parent(rec, parent)
-        rec2 = dict(rec2, block=d.Name if d is not None else "", instance_id=parent.get("instance_id") or parent["id"])
+        rec2 = dict(rec2, block=d.Name if d is not None else "", instance_id=parent.get("instance_id") or parent["id"],
+                    # цепочка id объектов определений от вставки верхнего уровня: уникальна внутри вставки,
+                    # даже если одно определение вложено несколько раз (экспорт делит по вставке + цепочке)
+                    part_chain=list(parent.get("part_chain", [])) + [rec["id"]],
+                    block_names=list(parent.get("block_names", [])) + [d.Name if d is not None else ""])
         parts2 = []
         for q in rec["parts"]:
             q2 = dict(q)
@@ -969,7 +974,8 @@ from .names import number_kind as _number_kind  # noqa: E402
 def _object_values(objs, opt, naming):
     """Значения атрибутов на объект."""
     out = {k: [] for k in ("layer", "layer_orig", "name", "name_orig", "rhino_id", "rhino_type", "path", "Cd",
-                           "Alpha", "material", "user_text", "block", "groups")}
+                           "Alpha", "material", "user_text", "block", "groups", "instance_id", "object_id",
+                           "part_path", "block_path")}
     for rec in objs:
         out["layer"].append(naming.layer(rec["layer"]))
         out["layer_orig"].append(rec["layer"])
@@ -985,6 +991,10 @@ def _object_values(objs, opt, naming):
         out["user_text"].append(dict(rec["user_text"]))
         out["block"].append(rec.get("block", ""))
         out["groups"].append(rec["groups"])
+        out["instance_id"].append(rec.get("instance_id") or "")
+        out["object_id"].append(rec["id"] if rec.get("instance_id") else "")
+        out["part_path"].append("/".join(rec.get("part_chain", [])))
+        out["block_path"].append("/".join(rec.get("block_names", [])))
     return out
 
 
@@ -1034,6 +1044,12 @@ def _write_object_attribs(geo, cls, vals, idx, ctx, with_color=True):
         _set_floats(geo, cls, "Alpha", np.asarray(vals["Alpha"], dtype=np.float32)[idx], 1, 1.0)
     if opt.materials and any(vals["material"]):
         _set_strings(geo, cls, "material", per("material"))
+    if any(vals["instance_id"]):
+        # раскрытые блоки: части одной вставки делят rhino_id (id вставки) — для экспорта нужны и части
+        _set_strings(geo, cls, "rhino_instance_id", per("instance_id"))
+        _set_strings(geo, cls, "rhino_object_id", per("object_id"))
+        _set_strings(geo, cls, "rhino_part_path", per("part_path"))
+        _set_strings(geo, cls, "rhino_block_path", per("block_path"))
     if any(vals["block"]):
         _set_strings(geo, cls, "block", per("block"))
     _write_user_text(geo, cls, vals["user_text"], idx, opt, naming)
@@ -1129,7 +1145,8 @@ def _write_cloud_attribs(geo, b, objs, ctx):
     vals = _object_values(objs, ctx.opt, ctx.naming)
     # элементы без объекта получают значения пустой записи (последний индекс)
     blank = {"layer": "", "layer_orig": "", "name": "", "name_orig": "", "rhino_id": "", "rhino_type": "",
-             "path": "", "Cd": (1.0, 1.0, 1.0), "Alpha": 1.0, "material": "", "user_text": {}, "block": "", "groups": []}
+             "path": "", "Cd": (1.0, 1.0, 1.0), "Alpha": 1.0, "material": "", "user_text": {}, "block": "", "groups": [],
+             "instance_id": "", "object_id": "", "part_path": "", "block_path": ""}
     for k, v in blank.items():
         vals[k] = vals[k] + [v]
     full = np.where(idx >= 0, idx, len(objs))
