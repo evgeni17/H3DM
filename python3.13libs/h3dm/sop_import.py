@@ -584,10 +584,11 @@ class Builder(object):
                     elif trimmed == 2:
                         groups[GROUP_TRIMMED_EXACT].append(n0 + k)
                         if not convert and item.get("trim_loops"):
-                            self.trim_loop_prims.append((n0 + k, item["trim_loops"]))
+                            self.trim_loop_prims.append((n0 + k, _scale_loops(item)))
                     if not convert and item["kind"] == "surface" and item.get("src_trim_hash"):
-                        from .houjson import profiles_signature
-                        sig = profiles_signature(item.get("trims"), float(item["knots_u"][0]), float(item["knots_v"][0]))
+                        from .houjson import profiles_signature, knot_scale
+                        sig = profiles_signature(item.get("trims"), float(item["knots_u"][0]), float(item["knots_v"][0]),
+                                                 knot_scale(item["knots_u"]), knot_scale(item["knots_v"]))
                         self.trim_sig_prims.append((n0 + k, sig + ":" + item["src_trim_hash"]))
         # 4) облака точек — отдельные точки без примитивов
         for v, c, obj in self.cloud:
@@ -847,6 +848,21 @@ def _cook_geometry(node, geo, f, opt, gx, naming):
         node.addWarning(text)
         return text
     return None
+
+
+def _scale_loops(item):
+    """Точные петли обрезки (JSON, UV примитива от 0) -> в параметре примитива Houdini (узлы поверхности
+    масштабированы houjson.safe_knots, если их интервалы слишком малы для Houdini)."""
+    import json
+    from .houjson import knot_scale
+    fu, fv = knot_scale(item["knots_u"]), knot_scale(item["knots_v"])
+    if fu == 1.0 and fv == 1.0:
+        return item["trim_loops"]
+    loops = json.loads(item["trim_loops"])
+    for lp in loops:
+        for c in lp.get("c", []):
+            c["p"] = [[u * fu, v * fv, w] for u, v, w in c["p"]]
+    return json.dumps(loops, separators=(",", ":"))
 
 
 def _emit(geo, b, objs, ctx):

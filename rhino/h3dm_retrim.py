@@ -26,7 +26,7 @@ import traceback
 import Rhino
 import Rhino.Geometry as G
 
-RETRIM_VERSION = 1
+RETRIM_VERSION = 3
 
 
 # ---------------------------------------------------------------- поверхность и кривые
@@ -147,8 +147,34 @@ def classify(loops):
 
 # ---------------------------------------------------------------- Brep грани
 
-def face_brep(srf, outer, holes, tol):
-    """Brep одной грани из поверхности и 2D-петель (вручную, как в примерах RhinoCommon)."""
+def _singular_iso(srf, c):
+    """Особая обрезка (ребро стянуто в точку) должна лежать на стороне области параметров: N/S/E/W."""
+    du, dv = srf.Domain(0), srf.Domain(1)
+    a, b = c.PointAtStart, c.PointAtEnd
+    eu = 1e-9 * max(1.0, abs(du.T1 - du.T0))
+    ev = 1e-9 * max(1.0, abs(dv.T1 - dv.T0))
+    for val, p0, p1, e, iso in ((du.T0, a.X, b.X, eu * 1e3, G.IsoStatus.West), (du.T1, a.X, b.X, eu * 1e3, G.IsoStatus.East),
+                                (dv.T0, a.Y, b.Y, ev * 1e3, G.IsoStatus.South), (dv.T1, a.Y, b.Y, ev * 1e3, G.IsoStatus.North)):
+        if abs(p0 - val) <= e and abs(p1 - val) <= e:
+            return iso
+    return None
+
+
+def _edge_by_points(srf, c, n=32):
+    """3D-ребро через точки 2D-кривой на поверхности (запасной путь, если Pushup не построил кривую)."""
+    d = c.Domain
+    pts = []
+    for i in range(n + 1):
+        p = c.PointAt(d.T0 + (d.T1 - d.T0) * i / float(n))
+        pts.append(srf.PointAt(p.X, p.Y))
+    crv = G.Curve.CreateInterpolatedCurve(pts, 3)
+    return crv
+
+
+def face_brep(srf, outer, holes, tol, vtol=None):
+    """Brep одной грани из поверхности и 2D-петель (вручную, как в примерах RhinoCommon).
+    vtol — допуск совпадения вершин (точность исходных данных; не меньше tol)."""
+    vtol = max(tol, vtol or tol)
     brep = G.Brep()
     si = brep.AddSurface(srf)
     face = brep.Faces.Add(si)
@@ -161,39 +187,59 @@ def face_brep(srf, outer, holes, tol):
             p = c.PointAtStart
             starts.append(srf.PointAt(p.X, p.Y))
             e = srf.Pushup(c, tol)
-            if e is not None and e.GetLength() <= tol:
-                e = None
+            iso_s = _singular_iso(srf, c)
+            if e is not None and e.GetLength() <= tol and iso_s is not None:
+                e = None                      # полюс: ребро стянуто в точку на стороне области
+            elif e is None and iso_s is None:
+                e = _edge_by_points(srf, c)   # Pushup не справился: ребро по точкам кривой на поверхности
             c3.append(e)
         # вершины по углам петли: совпадающие (полюс, шов) — одна вершина
         verts = []
 
         def vertex(pt):
             for v in verts:
-                if v.Location.DistanceTo(pt) <= tol:
+                if v.Location.DistanceTo(pt) <= vtol:
                     return v
-            v = brep.Vertices.Add(pt, tol)
+            v = brep.Vertices.Add(pt, vtol)
             verts.append(v)
             return v
         corner = [vertex(p) for p in starts]
+        # незамкнутое ребро не может начинаться и кончаться в одной вершине (углы ближе допуска сшивки)
+        for k in range(n):
+            e = c3[k]
+            if e is not None and not e.IsClosed and corner[k] is corner[(k + 1) % n]:
+                v = brep.Vertices.Add(e.PointAtEnd, vtol)
+                verts.append(v)
+                corner[(k + 1) % n] = v
         for k in range(n):
             c2i = brep.AddTrimCurve(curves[k])
             iso = srf.IsIsoparametric(curves[k])
             if c3[k] is None:
-                tr = brep.Trims.AddSingularTrim(corner[k], loop, iso, c2i)
+                tr = brep.Trims.AddSingularTrim(corner[k], loop, _singular_iso(srf, curves[k]), c2i)
             else:
                 c3i = brep.AddEdgeCurve(c3[k])
-                edge = brep.Edges.Add(corner[k], corner[(k + 1) % n], c3i, tol)
+                edge = brep.Edges.Add(corner[k], corner[(k + 1) % n], c3i, vtol)
                 tr = brep.Trims.Add(edge, False, loop, c2i)
                 tr.IsoStatus = iso
             tr.SetTolerances(tol, tol)
     brep.SetTolerancesBoxesAndFlags(False, True, True, True, True, True, True, True)
-    brep.JoinNakedEdges(tol)
+    brep.JoinNakedEdges(vtol)
     brep.Compact()
     return brep
 
 
+def _naked(b):
+    try:
+        return sum(1 for e in b.Edges if e.Valence == G.EdgeAdjacency.Naked)
+    except Exception:
+        return -1
+
+
 def build_object(obj, tol):
-    """Объект {'key', 'faces': [...]} -> (список Brep, сведения)."""
+    """Объект {'key', 'faces': [...], 'join_tol'} -> (список Brep, сведения). join_tol — допуск сшивки граней:
+    управляющие точки пришли из Houdini во float32, поэтому общие рёбра соседних граней расходятся на точность
+    float (на больших координатах это больше допуска файла)."""
+    jtol = max(tol, float(obj.get("join_tol") or 0.0))
     pieces, errors, nfaces = [], [], 0
     for f in obj["faces"]:
         try:
@@ -212,7 +258,7 @@ def build_object(obj, tol):
                 continue
             loops2d = [[make_curve2d(c, ab) for c in lp["c"]] for lp in loops if lp.get("c")]
             for outer, holes in classify(loops2d):
-                b = face_brep(srf, outer, holes, tol)
+                b = face_brep(srf, outer, holes, tol, jtol)
                 ok, log = b.IsValidWithLog()
                 if not ok:
                     b.Repair(tol)
@@ -226,16 +272,42 @@ def build_object(obj, tol):
             errors.append("face %s: %s" % (f.get("prim"), ex))
     if errors:
         return [], {"ok": False, "error": "; ".join(str(e) for e in errors)[:1000], "faces": nfaces}
-    joined = list(G.Brep.JoinBreps(pieces, tol) or []) if len(pieces) > 1 else pieces
-    if not joined:
-        joined = pieces
-    out = []
-    for b in joined:
-        ok, log = b.IsValidWithLog()
-        if not ok:
-            return [], {"ok": False, "error": "joined brep invalid: %s" % (log or "").strip()[:300], "faces": nfaces}
-        out.append(b)
-    return out, {"ok": True, "breps": len(out), "faces": nfaces, "solid": all(b.IsSolid for b in out)}
+    if len(pieces) == 1:
+        b = pieces[0]
+        return pieces, {"ok": True, "breps": 1, "faces": nfaces, "solid": bool(b.IsSolid), "naked": max(0, _naked(b)),
+                        "join_tol": jtol, "src_solid": obj.get("src_solid")}
+    # сшивка: от допуска точности данных вверх (рёбра Pushup соседних граней расходятся на допуск построения),
+    # пока тело исходника не замкнётся; берётся валидный результат с наименьшим числом свободных рёбер
+    best, last_err = None, ""
+    for t in (jtol, 2.0 * jtol, 5.0 * jtol, 10.0 * jtol, 20.0 * jtol):
+        dup = [p.DuplicateBrep() for p in pieces]
+        joined = list(G.Brep.JoinBreps(dup, t) or []) or dup
+        out, ok_all = [], True
+        for b in joined:
+            b.JoinNakedEdges(t)
+            ok, log = b.IsValidWithLog()
+            if not ok:
+                ok_all = False
+                last_err = (log or "").strip()[:300]
+                break
+            out.append(b)
+        if not ok_all:
+            continue
+        naked = sum(max(0, _naked(b)) for b in out)
+        key = (len(out), naked)
+        if best is None or key < best[0]:
+            best = (key, out, t)
+        if len(out) == 1 and (out[0].IsSolid or not obj.get("src_solid")):
+            break
+    if best is None:
+        # сшить не удалось ни с каким допуском — грани по отдельности (каждая валидна)
+        return pieces, {"ok": True, "breps": len(pieces), "faces": nfaces, "solid": False,
+                        "naked": sum(max(0, _naked(b)) for b in pieces), "join_tol": jtol,
+                        "src_solid": obj.get("src_solid"), "unjoined": last_err}
+    _, out, t = best
+    return out, {"ok": True, "breps": len(out), "faces": nfaces, "solid": all(b.IsSolid for b in out),
+                 "naked": sum(max(0, _naked(b)) for b in out), "join_tol": t,
+                 "src_solid": obj.get("src_solid")}
 
 
 # ---------------------------------------------------------------- задание

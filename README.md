@@ -4,7 +4,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
 *Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for trimmed NURBS surfaces.
 
-> **Status: 0.4.0-dev.5 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
+> **Status: 0.4.0-dev.6 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 
@@ -29,8 +29,13 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
   within *Trim Curve Tolerance* measured on the surface in model units (Houdini ignores trim weights). *Pack per Object* works with every mode. Every primitive is in one type group
   (`h3dm_type_polygon`, `h3dm_type_nurbs_curve`, `h3dm_type_nurbs_surface`, `h3dm_type_packed_geometry`,
   `h3dm_type_other`).
-* **NURBS:** Brep faces become Houdini NURBS surfaces with the exact degree, knots and weights. Export writes NURBS
-  surfaces untrimmed, with their boundary curves next to them.
+* **NURBS:** Brep faces become Houdini NURBS surfaces with the exact degree, knots and weights (knot vectors with
+  spans Houdini cannot hold are reparametrized linearly — the shape does not change).
+* **Export back to Rhino:** objects that were not changed in Houdini are copied from the source file exactly; objects
+  moved, rotated or scaled as a whole get the source Brep with the exact transform; changed trimmed Breps are
+  rebuilt in a running Rhino 8 (holes, joined faces, solids; a warning if a solid opens) — without Rhino they
+  become exact trimmed planes and meshes with a warning. Untrimmed surfaces, curves, meshes, blocks, points and all
+  attributes are written directly.
 * **Files without render meshes, trims, SubD:** rhino3dm cannot tessellate and does not expose trim curves.
   The **Prepare in Rhino** button sends the file to a running Rhino 8: it meshes every face, stores the 2D trim
   curves, converts SubD to NURBS and writes `<name>_h3dm_v###.3dm` next to the source; the node then switches to it.

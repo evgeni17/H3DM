@@ -992,10 +992,15 @@ def run_export_passthrough():
                 got = {k for k in breps if k in B and loops(B[k].Geometry) == loops(breps[k].Geometry)
                        and max(abs(a - b) for a, b in zip(box(B[k].Geometry), box(breps[k].Geometry))) < 1e-9}
                 tag = "export passthrough %s%s" % (mode, " moved" if moved else "")
-                if not got >= want or ("exact Breps): %d" % len(want)) not in text:
+                if not got >= want or ("exact Breps): %d" % len(breps)) not in text:
                     fails.append("%s: exact %d of %d" % (tag, len(got & want), len(want)))
-                if moved and dome in got:
-                    fails.append("%s: moved object copied from the source" % tag)
+                if moved:
+                    # купол сдвинут целиком на 0,05 м (Houdini Y) -> исходный Brep, поднятый на 50 мм
+                    d = [a - b for a, b in zip(box(B[dome].Geometry), box(breps[dome].Geometry))] if dome in B else None
+                    if d is None or loops(B[dome].Geometry) != loops(breps[dome].Geometry) or \
+                            max(abs(x) for x in (d[0], d[1], d[3], d[4])) > 1e-4 or abs(d[2] - 50) > 1e-4 or \
+                            abs(d[5] - 50) > 1e-4 or "as a whole in Houdini (source Brep + exact transform): 1" not in text:
+                        fails.append("%s: moved dome %s" % (tag, d))
                 lay = B.get(holed)
                 if lay is None or rr.enum_name(lay.Geometry.ObjectType) != "Brep":
                     fails.append("%s: holed panel missing" % tag)
@@ -1253,12 +1258,14 @@ def run_export_rhino():
 
         # 1) все объекты из Houdini (без исходника): пересборка = исходник (топология, тела, габарит)
         text, B = export(base, "all.3dm", passthrough=0)
-        for k in (col, rnd, holed, dome):
+        for k in (col, rnd, holed, dome, ids["Панель_01"], ids["SubD_куб"]):
             if k not in B or topo(B[k].Geometry) != topo(S[k].Geometry) or \
                     float(np.abs(box(B[k].Geometry) - box(S[k].Geometry)).max()) > 1e-6:
                 fails.append("rhino rebuild %s: %s vs %s" % (S[k].Attributes.Name, topo(B[k].Geometry) if k in B else None,
                                                              topo(S[k].Geometry)))
-        if "rebuilt in Rhino (exact Breps): 4" not in text or "as meshes" in text:
+        m = re.search(r"rebuilt in Rhino \(exact Breps\): (\d+)", text)
+        # 6 объектов фикстуры и части блоков (Packed = Explode): коробки из необрезанных граней тоже сшиваются
+        if not m or int(m.group(1)) < 6 or "as meshes" in text:
             fails.append("rhino rebuild report: %s" % text[-300:])
         if any(str(kv[0]).startswith("h3dm.") for o in B.values() for kv in (o.Geometry.GetUserStrings() or ())):
             fails.append("rhino rebuild: h3dm.* user strings written")
@@ -1272,8 +1279,13 @@ def run_export_rhino():
         d = box(B[col].Geometry) - box(S[col].Geometry) if col in B else None
         if d is None or topo(B[col].Geometry) != topo(S[col].Geometry) or abs(d[2] - 100.0) > 1e-6 or abs(d[5] - 100.0) > 1e-6:
             fails.append("rhino moved column: %s %s" % (topo(B[col].Geometry) if col in B else None, d))
-        if "rebuilt in Rhino (exact Breps): 1" not in text or "from the source file (exact Breps): 5" not in text:
+        if "exact transform): 1" not in text or "from the source file (exact Breps): 6" not in text:
             fails.append("rhino moved report: %s" % text[-300:])
+        # то же без исходника: пересборка в Rhino сдвинутого тела остаётся замкнутой (сшивка с допуском float)
+        text, B = export(g, "moved_rebuilt.3dm", passthrough=0)
+        if col not in B or topo(B[col].Geometry) != topo(S[col].Geometry):
+            fails.append("rhino moved rebuilt column: %s" % (topo(B[col].Geometry) if col in B else None,))
+        ex.parm("passthrough").set(1)
         # 3) отверстие удалено в Houdini -> пересборка по текущей обрезке Houdini: одна петля
         tgt = {p.number() for p in base.prims() if p.attribValue("rhino_id") == holed}
 
@@ -1325,6 +1337,61 @@ def run_export_rhino():
     return fails
 
 
+def run_export_real():
+    """Необязательно: реальная модель tests/private/konzal_h3dm_v001.3dm (подготовленная копия, в git не входит).
+    All NURBS без правок -> все Brep из исходника, тела замкнуты; сложное тело сдвинуто -> исходник с точным
+    преобразованием, тело замкнуто."""
+    import shutil
+    import tempfile
+    from h3dm import sop_export as se, rhino_read as rr
+    fails = []
+    src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "private", "konzal_h3dm_v001.3dm")
+    if not os.path.isfile(src):
+        print("houdini_regression export real: SKIPPED (no tests/private/konzal_h3dm_v001.3dm)")
+        return fails
+    rid = "2e73130e-2184-4498-8cd1-c10b3984ebc3"
+    S = {str(o.Attributes.Id): o.Geometry for o in rr.read(src).Objects}
+    n_brep = sum(1 for g in S.values() if rr.enum_name(g.ObjectType) == "Brep")
+    n_solid = sum(1 for g in S.values() if rr.enum_name(g.ObjectType) == "Brep" and g.IsSolid)
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_real_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_real")
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(src)
+        imp.parm("geomode").set("all_nurbs")
+        imp.parm("skiphidden").set(0)
+        imp.parm("skiplocked").set(0)
+        st = tmp.createNode("stash", "edited")
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, st)
+        ex.setInput(1, imp, 2)
+        base = imp.geometry().freeze()
+        st.parm("stash").set(base)
+        ex.parm("file").set(os.path.join(out_dir, "unchanged.3dm"))
+        text, path = se.run(ex, write=True)
+        B = [o.Geometry for o in rr.read(path).Objects if rr.enum_name(o.Geometry.ObjectType) == "Brep"]
+        if ("from the source file (exact Breps): %d" % n_brep) not in text or sum(1 for b in B if b.IsSolid) != n_solid:
+            fails.append("real unchanged: %d Breps, %d solid; %s" % (len(B), sum(1 for b in B if b.IsSolid), text[-300:]))
+        g = hou.Geometry(base)
+        pts = {v.point().number(): v.point() for p in g.prims() if p.attribValue("rhino_id") == rid for v in p.vertices()}
+        for pt in pts.values():
+            pt.setPosition(pt.position() + hou.Vector3(0, 0.1, 0))
+        st.parm("stash").set(g)
+        ex.parm("file").set(os.path.join(out_dir, "moved.3dm"))
+        text, path = se.run(ex, write=True)
+        b = {str(o.Attributes.Id): o.Geometry for o in rr.read(path).Objects}.get(rid)
+        dz = b.GetBoundingBox().Min.Z - S[rid].GetBoundingBox().Min.Z if b is not None else None
+        if b is None or not b.IsSolid or abs(dz - 100.0) > 1e-3 or "exact transform): 1" not in text:
+            fails.append("real moved: solid %s, dz %s" % (b.IsSolid if b is not None else None, dz))
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export real: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
-          + run_export_passthrough() + run_export_changes() + run_export_rhino())
+          + run_export_passthrough() + run_export_changes() + run_export_rhino()
+          + run_export_real())

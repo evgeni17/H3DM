@@ -52,7 +52,7 @@ def _mesh_faces_pos(m, scale):
 
 
 W_TOL = 1e-6          # веса (Pw может храниться во float32)
-K_TOL = 1e-6          # узлы — доля длины узлового вектора
+K_TOL = 1e-7          # узлы — доля длины узлового вектора (нормированные; Houdini может хранить float32)
 
 
 def _knots_equal(a, b):
@@ -62,26 +62,36 @@ def _knots_equal(a, b):
     if not len(a):
         return True
     a, b = a - a[0], b - b[0]
-    return float(np.abs(a - b).max()) <= K_TOL * max(1.0, abs(float(a[-1])))
+    ra, rb = float(a[-1]), float(b[-1])
+    if ra <= 0 or rb <= 0:
+        return ra == rb
+    # импорт масштабирует параметр (houjson.safe_knots), поэтому сравниваются нормированные узлы
+    return float(np.abs(a / ra - b / rb).max()) <= K_TOL
 
 
-def surface_matches(h, face, scale, tol):
+def _surface_pair(h, face, scale):
     """Примитив Houdini h = {'cv' (nv, nu, 3) в координатах файла, порядок вершин Houdini; 'w' (nv, nu);
-    'ku', 'kv'; 'ou', 'ov'; 'wrap'} против исходной грани — так, как её записал импорт (зажатие, разворот U)."""
+    'ku', 'kv'; 'ou', 'ov'; 'wrap'} и исходная грань (как её записал импорт: зажатие, разворот U).
+    Строение (размеры, порядки, узлы, веса) должно совпадать -> (точки исходника * scale, точки Houdini) или None."""
     from .rhino_read import nurbs_surface_data, houdini_reverse
     d = nurbs_surface_data(face.UnderlyingSurface(), reverse=houdini_reverse(face.OrientationIsReversed))
     if d is None:
-        return False
+        return None
     S = np.asarray(d["cv"], dtype=np.float64) * scale
     if S.shape != h["cv"].shape or any(h["wrap"]):
-        return False
+        return None
     if int(d["order_u"]) != h["ou"] or int(d["order_v"]) != h["ov"]:
-        return False
+        return None
     if not _knots_equal(d["knots_u"], h["ku"]) or not _knots_equal(d["knots_v"], h["kv"]):
-        return False
+        return None
     if float(np.abs(np.asarray(d["w"], dtype=np.float64) - h["w"]).max()) > W_TOL:
-        return False
-    return float(np.abs(S - h["cv"]).max()) <= tol
+        return None
+    return S.reshape(-1, 3), np.asarray(h["cv"], dtype=np.float64).reshape(-1, 3)
+
+
+def surface_matches(h, face, scale, tol):
+    pair = _surface_pair(h, face, scale)
+    return pair is not None and float(np.abs(pair[0] - pair[1]).max()) <= tol
 
 
 def trims_match(src_geom, sigs):
@@ -103,53 +113,122 @@ def trims_match(src_geom, sigs):
     return True
 
 
-def mesh_matches(prim_faces_pos, src_face_mesh, scale, tol):
-    """Вершины полигонов Houdini (в порядке импорта, обход развёрнут) против граней сетки отображения."""
+def _mesh_pair(prim_faces_pos, src_face_mesh, scale):
+    """Вершины полигонов Houdini (в порядке импорта, обход развёрнут) и грани сетки отображения ->
+    (точки исходника, точки Houdini) или None, если строение разное."""
     if src_face_mesh is None:
-        return False
+        return None
     src = _mesh_faces_pos(src_face_mesh, scale)
     if len(src) != len(prim_faces_pos):
-        return False
-    for a, b in zip(src, prim_faces_pos):
-        if a.shape != b.shape or float(np.abs(a - b).max()) > tol:
-            return False
-    return True
+        return None
+    if any(a.shape != b.shape for a, b in zip(src, prim_faces_pos)):
+        return None
+    if not src:
+        return np.zeros((0, 3)), np.zeros((0, 3))
+    return np.concatenate(src), np.concatenate([np.asarray(b, dtype=np.float64) for b in prim_faces_pos])
 
 
-def object_unchanged(src_geom, faces, scale, tol):
-    """faces: {номер грани: ('nurbs', данные примитива для surface_matches) | ('mesh', [позиции вершин
-    граней]) | ('other', None)}. Обрезку NURBS-граней проверяет trims_match."""
+def mesh_matches(prim_faces_pos, src_face_mesh, scale, tol):
+    pair = _mesh_pair(prim_faces_pos, src_face_mesh, scale)
+    return pair is not None and (not len(pair[0]) or float(np.abs(pair[0] - pair[1]).max()) <= tol)
+
+
+def _object_pairs(src_geom, faces, scale):
+    """Все пары точек (исходник * scale, Houdini) объекта или None, если строение граней не совпадает."""
+    from .rhino_read import enum_name
     brep = _faces_of(src_geom)
     if brep is None:
-        return False
-    n = len(brep.Faces)
-    from .rhino_read import enum_name
+        return None
     if enum_name(src_geom.ObjectType) == "Extrusion" and set(faces) == {-1}:
         # сетка экструзии целиком (импорт сетками: одна сетка без номера грани)
         kind, data = faces[-1]
-        m = src_geom.GetMesh(_r().MeshType.Any)
-        return kind == "mesh" and mesh_matches(data, m, scale, tol)
+        return _mesh_pair(data, src_geom.GetMesh(_r().MeshType.Any), scale) if kind == "mesh" else None
+    n = len(brep.Faces)
     if set(faces) != set(range(n)):
-        return False
+        return None
+    A, B = [], []
     for fi in range(n):
         kind, data = faces[fi]
         face = brep.Faces[fi]
         if kind == "nurbs":
-            if not surface_matches(data, face, scale, tol):
-                return False
+            pair = _surface_pair(data, face, scale)
         elif kind == "mesh":
-            if not mesh_matches(data, face.GetMesh(_r().MeshType.Any), scale, tol):
-                return False
+            pair = _mesh_pair(data, face.GetMesh(_r().MeshType.Any), scale)
         else:
-            return False
-    return True
+            pair = None
+        if pair is None:
+            return None
+        A.append(pair[0])
+        B.append(pair[1])
+    return np.concatenate(A), np.concatenate(B)
 
 
-def source_geometry(src_geom, scale):
-    """Копия исходной геометрии для записи: единицы файла, без служебных строк H3DM."""
+def fit_affine(A, B):
+    """Аффинное преобразование X -> M[:3,:3] X + M[:3,3], переводящее точки A в B (наименьшие квадраты, double).
+    -> (4x4, наибольшее отклонение) или None, если точки вырождены (лежат в плоскости)."""
+    if len(A) < 4:
+        return None
+    c = A.mean(axis=0)
+    X = np.column_stack([A - c, np.ones(len(A))])
+    if np.linalg.matrix_rank(X[:, :3], tol=1e-9 * max(1.0, float(np.abs(A - c).max()))) < 3:
+        return None
+    sol, *_ = np.linalg.lstsq(X, B, rcond=None)          # (4, 3): строки — оси и сдвиг для A - c
+    L = sol[:3].T
+    # шум float32 позиций Houdini даёт ложный малый масштаб/сдвиг осей: близкое к повороту (или повороту с
+    # равномерным масштабом) приводится к нему точно
+    U, sv, Vt = np.linalg.svd(L)
+    R = U @ Vt
+    k = float(sv.mean())
+    if float(np.abs(sv - 1.0).max()) < 1e-5:
+        L = R
+    elif float(sv.max() - sv.min()) < 1e-5 * k:
+        L = R * k
+    t = B.mean(axis=0) - L @ c
+    M = np.eye(4)
+    M[:3, :3] = L
+    M[:3, 3] = t
+    err = float(np.abs(A @ L.T + t - B).max())
+    return M, err
+
+
+def object_match(src_geom, faces, scale, tol):
+    """-> 'same' (геометрия совпадает), матрица 4x4 (тот же объект, перенесённый/повёрнутый/масштабированный
+    в Houdini — точно с точностью float) или None. Обрезку NURBS-граней проверяет trims_match."""
+    pairs = _object_pairs(src_geom, faces, scale)
+    if pairs is None:
+        return None
+    A, B = pairs
+    if not len(A):
+        return None
+    if float(np.abs(A - B).max()) <= tol:
+        return "same"
+    fit = fit_affine(A, B)
+    if fit is None:
+        return None
+    M, err = fit
+    if err > tol or abs(np.linalg.det(M[:3, :3])) < 1e-12:
+        return None
+    return M
+
+
+def object_unchanged(src_geom, faces, scale, tol):
+    m = object_match(src_geom, faces, scale, tol)
+    return isinstance(m, str) and m == "same"
+
+
+def source_geometry(src_geom, scale, xform=None):
+    """Копия исходной геометрии для записи: единицы файла, преобразование из Houdini (4x4, double), без
+    служебных строк H3DM."""
     g = src_geom.Duplicate()
     if abs(scale - 1.0) > 1e-15:
         g.Scale(scale)
+    if xform is not None:
+        xf = _r().Transform(1.0)
+        M = np.asarray(xform, dtype=np.float64)
+        for i in range(4):
+            for j in range(4):
+                setattr(xf, "M%d%d" % (i, j), float(M[i, j]))
+        g.Transform(xf)
     try:
         keys = [str(kv[0]) for kv in (g.GetUserStrings() or ())]
     except Exception:

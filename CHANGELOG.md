@@ -1,5 +1,32 @@
 # Changelog
 
+## 0.4.0-dev.6 — 2026-10-05
+Fixes from the real-model round trip (test.3dm of AA_LIK_KonZal: 114 Breps, 3873 faces, 113 solids).
+* **Knot vectors Houdini rejects:** Houdini 22 drops a knot vector with a span below ~1e-5 (absolute) and puts
+  `[0 0 0 0 1 1 1 1]` instead — the surface or trim curve was silently broken in Houdini, its trim signature never
+  matched and 78 unchanged objects were rebuilt. The import now reparametrizes such knot vectors linearly (shape
+  unchanged) so the smallest span is >= 1e-3, with the trims, the exact loops and the signature in the same
+  parameter; knots are compared normalized.
+* **Houdini .geo writer loses trims:** in a primitive "run" Houdini writes the fields of the first primitive only,
+  so trims of later primitives vanish when the first one is untrimmed. The trim reader puts a trimmed helper
+  primitive first and re-reads anything not covered.
+* **Moved / rotated / scaled objects** (one affine transform for all control points / vertices within float
+  precision, near-rotations snapped) are written as the source Brep with that transform in double precision —
+  exact and still solid. Real model: a 105-face solid moved by 100 mm comes back closed, 100 mm higher.
+* **Rebuilding in Rhino:** all changed Brep objects with two or more NURBS faces are sent (also those without
+  trims, so boxes join into solids); faces are joined with a tolerance that starts at the float precision of the
+  Houdini positions and grows up to 20x until the source solid closes (the valid result with the fewest naked
+  edges wins; otherwise the faces are written separately); singular trims get their N/S/E/W side; an edge that
+  Pushup cannot build is interpolated on the surface; an open edge never shares one vertex at both ends.
+  The source file is opened for this even when passthrough is off. New warnings: a source solid that is open
+  after rebuilding (naked edge count) and an object written as several Breps.
+* **Fallback meshes:** Convert LOD is capped per face (no more than 64 divisions per direction) and can be
+  interrupted — before, faces with hundreds of spans took minutes.
+* Real model, All NURBS: unchanged — 114 Breps copied, 113 solids (17 s); everything rebuilt in Rhino (passthrough
+  off) — 113 of 114 objects, 111 of 113 solids (96 s); the remaining ones are reported (one Brep is already
+  invalid in the source). Tests: `run_export_real` (optional, private file), moved objects in the passthrough
+  and Rhino sections, Houdini-safe knots in `test_houjson`.
+
 ## 0.4.0-dev.5 — 2026-10-05
 Export, step 4: changed trimmed Breps are rebuilt in Rhino.
 * **Trimmed Surfaces = Rebuild in Rhino** (new default): every NURBS face of a changed object with trimmed faces

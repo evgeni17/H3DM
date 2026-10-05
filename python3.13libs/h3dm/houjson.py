@@ -122,6 +122,31 @@ def _points_doc(P, prims, W=None, ptype=None, extra=None):
     return doc + (extra or [])
 
 
+MIN_SPAN = 1e-3   # Houdini отбрасывает узловой вектор с интервалом < ~1e-5 (абсолютно) и ставит [0..0 1..1]
+
+
+def knot_scale(knots):
+    """Множитель параметра, при котором наименьший ненулевой интервал узлов >= MIN_SPAN. Линейная
+    перепараметризация не меняет форму кривой/поверхности; обрезка масштабируется тем же множителем."""
+    k = np.asarray(knots, dtype=np.float64).reshape(-1)
+    if len(k) < 2:
+        return 1.0
+    d = np.diff(k)
+    d = d[d > 0]
+    if not len(d):
+        return 1.0
+    m = float(d.min())
+    return 1.0 if m >= MIN_SPAN else MIN_SPAN / m
+
+
+def safe_knots(knots):
+    """Узлы от 0, масштабированные для Houdini. -> (узлы, множитель)."""
+    k = np.asarray(knots, dtype=np.float64).reshape(-1)
+    k = k - k[0]
+    f = knot_scale(k)
+    return (k * f if f != 1.0 else k), f
+
+
 def _curve_prim(start, n, order, knots):
     knots = np.asarray(knots, dtype=np.float64)
     clamped = len(knots) >= 2 and knots[0] == knots[1]
@@ -130,27 +155,27 @@ def _curve_prim(start, n, order, knots):
         "basis", ["type", "NURBS", "order", int(order), "endinterpolation", bool(clamped), "knots", knots]]]
 
 
-def _profile_regions(loops, su, sv):
+def _profile_regions(loops, su, sv, fu=1.0, fv=1.0):
     """Петли кривых обрезки (UV в домене поверхности) -> области в том виде, как они пишутся в profiles:
-    [[(порядок, узлы от 0, точки (n, 3) = (u - su, v - sv, 1), u0, u1), ...], ...] — одна область на петлю."""
+    [[(порядок, узлы от 0, точки (n, 3) = ((u - su) * fu, (v - sv) * fv, 1), u0, u1), ...], ...] — одна область на
+    петлю; fu, fv — множители параметра поверхности (knot_scale), узлы кривых — тоже безопасные для Houdini."""
     regions = []
     for loop in loops or ():
         faces = []
         for c in loop:
             uv = np.asarray(c["cv"], dtype=np.float64).reshape(-1, 2)
-            P = np.column_stack([uv[:, 0] - su, uv[:, 1] - sv, np.ones(len(uv))])
-            kn = np.asarray(c["knots"], dtype=np.float64)
-            kn = kn - kn[0]
+            P = np.column_stack([(uv[:, 0] - su) * fu, (uv[:, 1] - sv) * fv, np.ones(len(uv))])
+            kn, _ = safe_knots(c["knots"])
             faces.append((int(c["order"]), kn, P, float(kn[0]), float(kn[-1])))
         if faces:
             regions.append(faces)
     return regions
 
 
-def _profiles(loops, su, sv):
+def _profiles(loops, su, sv, fu=1.0, fv=1.0):
     """Петли кривых обрезки (UV в домене поверхности) -> вложенная геометрия profiles."""
     P, prims, regions, n = [], [], [], 0
-    for region in _profile_regions(loops, su, sv):
+    for region in _profile_regions(loops, su, sv, fu, fv):
         faces = []
         for order, kn, pts, u0, u1 in region:
             P.append(pts)
@@ -182,9 +207,9 @@ def _signature(regions):
     return h.hexdigest()[:20]
 
 
-def profiles_signature(loops, su, sv):
+def profiles_signature(loops, su, sv, fu=1.0, fv=1.0):
     """Подпись обрезки, которую импорт записывает в profiles (loops = None — без обрезки)."""
-    return _signature(_profile_regions(loops, su, sv))
+    return _signature(_profile_regions(loops, su, sv, fu, fv))
 
 
 def _kv(lst):
@@ -275,6 +300,29 @@ def profile_regions_doc(doc):
     return regions
 
 
+def surface_profiles_checked(geo_doc):
+    """.geo -> [(profiles или None, надёжно)] по NURBMesh в порядке примитивов. Houdini 22 при записи «прогона»
+    (run) берёт набор полей по первому примитиву: если у него нет обрезки, обрезка остальных примитивов прогона
+    в файл НЕ попадает. Надёжно — примитив вне прогона, первый в прогоне или прогон с полем profiles."""
+    d = _kv(geo_doc)
+    out = []
+    for pr in d.get("primitives", []):
+        head = _kv(pr[0])
+        if head.get("type") == "run":
+            if head.get("runtype") != "NURBMesh":
+                continue
+            names = list(head.get("varyingfields", []))
+            uni = _kv(head.get("uniformfields", {}))
+            has = "profiles" in names or "profiles" in uni
+            for j, vals in enumerate(pr[1]):
+                f = dict(uni)
+                f.update(zip(names, vals))
+                out.append((f.get("profiles"), has or j == 0))
+        elif head.get("type") == "NURBMesh":
+            out.append((_kv(pr[1]).get("profiles"), True))
+    return out
+
+
 def surface_profiles(geo_doc):
     """.geo Houdini (JSON) -> [вложенная геометрия profiles или None] по NURBMesh в порядке примитивов."""
     d = _kv(geo_doc)
@@ -298,22 +346,22 @@ def nurbs_geo(items):
             P.append(cv.reshape(-1, 3))
             W.append(w.reshape(-1))
             rows = list(np.arange(base, base + nv * nu, dtype=np.int32).reshape(nv, nu))
-            ku = np.asarray(it["knots_u"], dtype=np.float64)
-            kv = np.asarray(it["knots_v"], dtype=np.float64)
-            su, sv = float(ku[0]), float(kv[0])
+            su, sv = float(it["knots_u"][0]), float(it["knots_v"][0])
+            ku, fu = safe_knots(it["knots_u"])
+            kv, fv = safe_knots(it["knots_v"])
             body = ["vertex", rows, "surface", "quads", "uwrap", False, "vwrap", False,
-                    "ubasis", ["type", "NURBS", "order", int(it["order_u"]), "endinterpolation", True, "knots", ku - su],
-                    "vbasis", ["type", "NURBS", "order", int(it["order_v"]), "endinterpolation", True, "knots", kv - sv]]
+                    "ubasis", ["type", "NURBS", "order", int(it["order_u"]), "endinterpolation", True, "knots", ku],
+                    "vbasis", ["type", "NURBS", "order", int(it["order_v"]), "endinterpolation", True, "knots", kv]]
             if it.get("trims"):
-                body += ["profiles", _profiles(it["trims"], su, sv)]
+                body += ["profiles", _profiles(it["trims"], su, sv, fu, fv)]
             prims.append([["type", "NURBMesh"], body])
             base += nv * nu
         else:
             cv = cv.reshape(-1, 3)
             P.append(cv)
             W.append(w.reshape(-1))
-            kn = np.asarray(it["knots"], dtype=np.float64)
-            prims.append(_curve_prim(base, len(cv), it["order"], kn - kn[0]))
+            kn, _ = safe_knots(it["knots"])
+            prims.append(_curve_prim(base, len(cv), it["order"], kn))
             base += len(cv)
     P = np.concatenate(P) if P else np.zeros((0, 3))
     W = np.concatenate(W) if W else np.zeros(0)

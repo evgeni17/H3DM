@@ -274,8 +274,10 @@ writing. The report (and the read-back check) is on the *Report* tab.
   in Houdini must be the ones the import wrote, and the source file's trims must be the ones it had at import);
   mesh faces by their vertices. Layer, name, material, User Text and the other attributes still come from
   Houdini, so renaming or moving to another layer keeps the exact geometry. Works for block definitions too.
-  Any change of the shape (a point, a weight, a knot, a trim or hole, a transform) exports the object from the
-  Houdini geometry instead. NURBS objects imported by H3DM older than 0.4.0-dev.4 are not copied: re-import.
+  An object moved, rotated, mirrored or scaled as a whole in Houdini (every control point / vertex follows one
+  affine transform within float precision) is also copied from the source, with that transform in double
+  precision. Any other change of the shape (a point, a weight, a knot, a trim or hole) exports the object from
+  the Houdini geometry instead. NURBS objects imported by H3DM older than 0.4.0-dev.4 are not copied: re-import.
 * Closed polygons: one mesh per Rhino object of the import (`rhino_id`, or `rhino_instance_id` + `rhino_part_path`
   for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
 * Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
@@ -345,8 +347,10 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
   (после трансформа экспорта, с точностью float), веса, узлы, порядки и обрезка (`rhino_trim_sig`: кривые
   обрезки в Houdini должны быть те, что записал импорт, а обрезка исходного файла — та, что была при импорте);
   сетки — по вершинам. Слой, имя, материал, User Text и прочие атрибуты берутся из Houdini — переименование и
-  перенос на другой слой сохраняют точную геометрию. Работает и для определений блоков. Любое изменение формы
-  (точка, вес, узел, обрезка или отверстие, трансформ) — объект пишется из геометрии Houdini. NURBS-объекты,
+  перенос на другой слой сохраняют точную геометрию. Работает и для определений блоков. Объект, перенесённый,
+  повёрнутый, отражённый или масштабированный в Houdini целиком (все управляющие точки и вершины следуют одному
+  аффинному преобразованию с точностью float), тоже копируется из исходника — с этим преобразованием в double.
+  Любое другое изменение формы (точка, вес, узел, обрезка или отверстие) — объект пишется из геометрии Houdini. NURBS-объекты,
   импортированные H3DM старше 0.4.0-dev.4, не копируются: импортируйте заново.
 * Замкнутые полигоны: одна сетка на объект Rhino импорта (`rhino_id`, у частей блоков — `rhino_instance_id` +
   `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.

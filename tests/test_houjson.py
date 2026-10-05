@@ -147,5 +147,25 @@ run = [["type", "run", "runtype", "NURBMesh", "varyingfields", ["vertex", "profi
 pr = H.surface_profiles(["primitives", [run]])
 check(len(pr) == 2 and pr[0] is None and H.profiles_signature_doc(pr[1]) == sig, "run-encoded NURBMesh profiles")
 
+# 5) узлы, которые Houdini не принимает (интервал < ~1e-5): линейная перепараметризация, обрезка — тем же множителем
+k, f = H.safe_knots([5, 5, 5, 5, 5 + 4e-6, 6, 6, 6, 6])
+check(abs(f - 1e-3 / 4e-6) < 1e-6 and abs(np.diff(k)[np.diff(k) > 0].min() - 1e-3) < 1e-12, "safe knots: smallest span 1e-3")
+check(H.knot_scale([0, 0, 1, 2, 2]) == 1.0, "safe knots: normal vector unchanged")
+it = {"kind": "surface", "cv": np.zeros((2, 2, 3)), "w": np.ones((2, 2)), "order_u": 2, "order_v": 2,
+      "knots_u": [1, 1, 1 + 2e-6, 1 + 2e-6], "knots_v": [0, 0, 1, 1],
+      "trims": [[{"order": 2, "knots": [0, 0, 1, 1], "cv": [(1 + 1e-6, 0.5), (1 + 1e-6, 0.5)]}]]}
+dd = dict(zip(H.nurbs_geo([it])[0::2], H.nurbs_geo([it])[1::2]))
+body = dd["primitives"][0][1]
+ub = body[body.index("ubasis") + 1]
+kn = list(ub[ub.index("knots") + 1])
+prof = dict(zip(body[body.index("profiles") + 1][0::2], body[body.index("profiles") + 1][1::2]))
+pv = prof["attributes"][1][0][1]
+pv = pv[pv.index("values") + 1]
+pu = float(np.asarray(pv[pv.index("rawpagedata") + 1]).reshape(-1, 3)[0, 0])
+check(abs(kn[-1] - 1e-3) < 1e-12 and abs(pu - 5e-4) < 1e-12, "safe knots: surface and its trims scaled together")
+sig_a = H.profiles_signature(it["trims"], 1.0, 0.0, H.knot_scale(it["knots_u"]), 1.0)
+check(sig_a == H.profiles_signature_doc(_json.loads(_json.dumps(body[body.index("profiles") + 1], default=lambda o: o.tolist()))),
+      "safe knots: signature in the scaled parameter")
+
 print("test_houjson: %s" % ("OK" if not FAIL else "FAILED\n  " + "\n  ".join(FAIL)))
 raise SystemExit(1 if FAIL else 0)
