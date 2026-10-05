@@ -640,5 +640,261 @@ def run_block_ids():
     return fails
 
 
+def run_constant_attribs():
+    """Одно значение на все элементы (один слой в файле, Packed per Object, блоки): строки и User Text не пустые.
+    Регресс 0.3.0-0.3.2: значение по умолчанию строковых/dict-атрибутов Houdini не применяется к элементам."""
+    import tempfile
+    from h3dm import ensure_vendor_path
+    ensure_vendor_path()
+    import rhino3dm as r
+    fails = []
+    path = os.path.join(tempfile.mkdtemp(prefix="h3dm_const_"), "один слой.3dm")
+    f = r.File3dm()
+    L = r.Layer()
+    L.Name = "Слой"
+    li = f.Layers.Add(L)
+    for k in range(3):
+        a = r.ObjectAttributes()
+        a.LayerIndex = li
+        a.Name = "Объект"
+        a.SetUserString("Марка", "M-1")
+        m = r.Mesh()
+        for p in ((k, 0, 0), (k + 1, 0, 0), (k + 1, 1, 0)):
+            m.Vertices.Add(*p)
+        m.Faces.AddFace(0, 1, 2)
+        f.Objects.AddMesh(m, a)
+    f.Write(path, 8)
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_const")
+    try:
+        n = tmp.createNode("h3dm::3dm_import", "imp")
+        n.parm("file").set(path)
+        n.parm("diskcache").set(0)
+        g = n.geometry(0)
+        vals = {(p.attribValue("layer"), p.attribValue("name"), p.attribValue("layer_orig"),
+                 (p.attribValue("user_text") or {}).get("Марка")) for p in g.prims()}
+        if vals != {("Sloy", "Obekt", "Слой", "M-1")}:
+            fails.append("constant attributes, one layer: %s" % sorted(vals))
+        # Packed per Object и блоки фикстуры: содержимое packed-примитивов
+        n.parm("file").set(os.path.join(FX, "h3dm_fixture_v001.3dm"))
+        for pack in (1, 0):
+            n.parm("pack").set(pack)
+            g = n.geometry(0)
+            for p in g.prims():
+                if not p.type().name().startswith("Packed"):
+                    continue
+                inner = p.getEmbeddedGeometry()
+                if inner is None or not inner.prims():
+                    continue
+                if inner.findPrimAttrib("layer") is None or any(not q.attribValue("layer") for q in inner.prims()):
+                    fails.append("constant attributes: empty layer inside packed %s (pack=%d)"
+                                 % (p.attribValue("name"), pack))
+                    break
+    finally:
+        tmp.destroy()
+    print("houdini_regression constant attributes: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+def run_export():
+    """0.4 этап 1: Rhino -> Houdini -> .3dm -> сравнение с исходником (rt_compare)."""
+    import shutil
+    import sys
+    import tempfile
+    sys.path.insert(0, os.path.join(ROOT, "tests"))
+    import importlib
+    import rt_compare
+    importlib.reload(rt_compare)
+    from h3dm import sop_export as se, ensure_vendor_path
+    ensure_vendor_path()
+    import rhino3dm as r
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export")
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, imp, 0)
+        ex.setInput(1, imp, 2)
+
+        def export(name, **parms):
+            for k, v in parms.items():
+                ex.parm(k).set(v)
+            ex.parm("file").set(os.path.join(out_dir, name))
+            return se.run(ex, write=True)
+
+        # 1) атрибуты и габариты (сетки, кривые, облака), User Text без «лишних» ключей
+        src = os.path.join(FX, "h3dm_fixture_v001.3dm")
+        imp.parm("file").set(src)
+        imp.parm("geomode").set("mesh_curves")
+        text, path = export("attrs.3dm")
+        c = rt_compare.compare(src, path, tol=0.01, fields=("name", "layer", "ut", "mat", "groups", "box"))
+        nbox = sum(1 for k in set(c["a"]["objects"]) & set(c["b"]["objects"]) if c["b"]["objects"][k][0]["box"])
+        if c["diffs"] or c["common"] < 12 or nbox < 10:
+            fails.append("export attrs: %d common, %s" % (c["common"], [(k[:8], f, a, b) for k, f, a, b in c["diffs"]][:4]))
+        B = c["b"]
+        if any(g.startswith(("h3dm_type_", "rhino_")) for o in B["objects"].values() for g in o[0]["groups"]):
+            fails.append("export: service groups written")
+        parts = [o[0] for o in B["objects"].values() if o[0]["name"] in ("Рама", "Стекло")]
+        if len(parts) != 10 or any(p["layer"] != "Фасад::Окна" for p in parts) or \
+                {p["mat"] for p in parts if p["name"] == "Рама"} != {"Бетон"}:
+            fails.append("export: block parts %s" % [(p["name"], p["layer"], p["mat"]) for p in parts][:4])
+        # 2) точность NURBS-кривых и поверхностей, User Text облака
+        src2 = os.path.join(FX, "h3dm_edgecases_v001.3dm")
+        imp.parm("file").set(src2)
+        imp.parm("geomode").set("all_nurbs")
+        text, path = export("nurbs.3dm")
+        dev = rt_compare.shape_deviation(src2, path)
+        if dev["curves"] > 1e-6 or dev["surfaces"] > 1e-6 or not dev["n_curves"] or not dev["n_surfaces"]:
+            fails.append("export NURBS deviation %s" % dev)
+        c = rt_compare.compare(src2, path, fields=("name", "layer", "ut", "mat"))
+        if c["diffs"]:
+            fails.append("export edge cases: %s" % [(k[:8], f, a, b) for k, f, a, b in c["diffs"]][:4])
+        src3 = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+        imp.parm("file").set(src3)
+        text, path = export("prepared.3dm")
+        dev = rt_compare.shape_deviation(src3, path)
+        if dev["surfaces"] > 1e-3 or dev["n_surfaces"] < 70 or "trimmed NURBS faces written as meshes" not in text:
+            fails.append("export prepared: %s %s" % (dev, text[-200:]))
+        # 3) далёкие координаты, единицы, источник трансформа
+        f = r.File3dm.Read(src)
+        far = r.Vector3d(2267123.456, 8196789.012, 345.678)
+        for o in f.Objects:
+            if not o.Attributes.IsInstanceDefinitionObject:
+                o.Geometry.Translate(far)
+        far_src = os.path.join(out_dir, "далеко.3dm")
+        f.Write(far_src, 8)
+        imp.parm("file").set(far_src)
+        imp.parm("geomode").set("mesh_curves")
+        imp.parm("xformmode").set("auto_far")
+        text, path = export("far.3dm", unit="source")
+        c = rt_compare.compare(far_src, path, tol=0.01, fields=("box",))
+        if c["diffs"] or "origin 22" not in text:
+            fails.append("export far: %s" % [(k[:8], a, b) for k, _, a, b in c["diffs"]][:3])
+        text, path = export("far_m.3dm", unit="m")
+        A, Bm = rt_compare.info(far_src), rt_compare.info(path)
+        worst = max((max(abs(x / 1000.0 - y) for x, y in zip(A["objects"][k][0]["box"], Bm["objects"][k][0]["box"]))
+                     for k in set(A["objects"]) & set(Bm["objects"])
+                     if A["objects"][k][0]["box"] and Bm["objects"][k][0]["box"]), default=1.0)
+        if worst > 1e-5 or Bm["units"] != "Meters":
+            fails.append("export meters: worst %.3g m, %s" % (worst, Bm["units"]))
+        ex.parm("unit").set("source")
+        ex.setInput(1, None)
+        text, path = export("far_detail.3dm")
+        if rt_compare.compare(far_src, path, tol=0.01, fields=("box",))["diffs"] or "Transform: detail" not in text:
+            fails.append("export far without input 2")
+        box = tmp.createNode("box", "not_xform")
+        ex.setInput(1, box)
+        try:
+            se.run(ex, write=False)
+            fails.append("export: input 2 without h3dm_xform accepted")
+        except se.ExportError:
+            pass
+        ex.setInput(1, imp, 2)
+        imp.parm("xformmode").set("auto_far")
+        # 4) защита исходника, версии, атомарная запись
+        ex.parm("overwrite").set(1)
+        ex.parm("file").set(far_src)
+        try:
+            se.run(ex, write=True)
+            fails.append("export: source file overwritten")
+        except se.ExportError:
+            pass
+        ex.parm("overwrite").set(0)
+        p1 = export("ver.3dm")[1]
+        p2 = export("ver.3dm")[1]
+        if os.path.basename(p2) != "ver_v002.3dm" or any("h3dm_tmp" in x for x in os.listdir(out_dir)):
+            fails.append("export versions: %s %s" % (os.path.basename(p1), os.path.basename(p2)))
+        # 5) правка пользователя важнее оригинала: переименованный слой и объект
+        imp.parm("file").set(src)
+        w = tmp.createNode("attribwrangle", "edit")
+        w.setInput(0, imp, 0)
+        w.parm("class").set(1)
+        w.parm("snippet").set('if (s@name == "Panel_01") { s@layer = "Novyy::Sloy"; s@name = "Panel_X"; }')
+        ex.setInput(0, w)
+        text, path = export("edit.3dm")
+        objs = [o[0] for o in rt_compare.info(path)["objects"].values()]
+        mine = [o for o in objs if o["name"] == "Panel_X"]
+        if not mine or mine[0]["layer"] != "Novyy::Sloy" or not any(o["name"] == "Купол" for o in objs):
+            fails.append("export edits: %s" % [(o["name"], o["layer"]) for o in objs][:6])
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+def run_export_new():
+    """Экспорт геометрии, созданной в Houdini (без импорта): типы, разбиение, единицы, оси."""
+    import shutil
+    import tempfile
+    import numpy as np
+    from h3dm import sop_export as se, rhino_read as rr
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_new_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_new")
+    try:
+        box = tmp.createNode("box", "box")                                   # 6 четырёхугольников, связный
+        box2 = tmp.createNode("box", "box2")
+        box2.parmTuple("t").set((5, 0, 0))
+        sph = tmp.createNode("sphere", "sph")                                # примитив Sphere -> сетка
+        sph.parmTuple("t").set((0, 5, 0))
+        circ = tmp.createNode("circle", "circ")                              # замкнутая NURBS -> периодическая
+        circ.parm("type").set("nurbs")
+        circ.parmTuple("t").set((0, 0, 5))
+        line = tmp.createNode("line", "line")                                # открытая полилиния
+        ngon = tmp.createNode("circle", "ngon")                              # 6-угольник -> разбивка
+        ngon.parm("type").set("poly")
+        ngon.parm("divs").set(6)
+        ngon.parmTuple("t").set((0, 0, -5))
+        dots = tmp.createNode("add", "dots")
+        dots.parm("points").set(1)
+        dots.parmTuple("pt0").set((1, 2, 3))
+        w = tmp.createNode("attribwrangle", "txt")
+        w.setInput(0, dots)
+        w.parm("class").set(2)
+        w.parm("snippet").set('s@text = "Метка";')
+        merge = tmp.createNode("merge", "m")
+        for i, n in enumerate((box, box2, sph, circ, line, ngon, w)):
+            merge.setInput(i, n)
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, merge)
+        ex.parm("file").set(os.path.join(out_dir, "new.3dm"))
+        ex.parm("unit").set("mm")
+        text, path = se.run(ex, write=True)
+        f = rr.read(path)
+        kinds = {}
+        for o in f.Objects:
+            k = rr.enum_name(o.Geometry.ObjectType)
+            kinds[k] = kinds.get(k, 0) + 1
+        if kinds.get("Mesh") != 4 or kinds.get("Curve") != 2 or kinds.get("TextDot") != 1:
+            fails.append("export new: kinds %s" % kinds)
+        for o in f.Objects:
+            g = o.Geometry
+            k = rr.enum_name(g.ObjectType)
+            if k == "Curve":
+                nc = g.ToNurbsCurve()
+                if nc.IsClosed:
+                    # окружность Houdini радиуса 1 в плоскости XY на z=5 (метры, Y-up) -> Rhino Z-up:
+                    # (x, y, z)_H -> (x, -z, y)_R: плоскость XZ на y = -5000 мм, радиус 1000 мм
+                    d = nc.Domain
+                    pts = [nc.PointAt(d.T0 + t * (d.T1 - d.T0)) for t in np.linspace(0, 1, 33)]
+                    rad = [np.hypot(p.X, p.Z) for p in pts]
+                    if max(abs(x - 1000.0) for x in rad) > 15.0 or max(abs(p.Y + 5000.0) for p in pts) > 1e-3:
+                        fails.append("export new: circle radii %s" % [round(x, 1) for x in rad[:4]])
+            if k == "Mesh":
+                if any(len(set(g.Faces[i])) > 4 for i in range(len(g.Faces))):
+                    fails.append("export new: mesh face with > 4 vertices")
+            if k == "TextDot" and o.Geometry.Text != "Метка":
+                fails.append("export new: text dot %s" % o.Geometry.Text)
+        if "No h3dm_xform" not in text:
+            fails.append("export new: no warning about missing transform")
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export new geometry: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
-          + run_block_ids())
+          + run_block_ids() + run_constant_attribs() + run_export() + run_export_new())

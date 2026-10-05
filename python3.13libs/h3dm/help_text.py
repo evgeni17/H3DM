@@ -247,25 +247,49 @@ HELP_EXPORT_EN = u"""= H3DM 3dm Export =
 #internal: h3dm::3dm_export
 #icon: SOP/rop_geometry
 
-\"\"\"Writes Houdini geometry to a Rhino .3dm file (export arrives in H3DM 0.4).\"\"\"
+\"\"\"Writes Houdini geometry to a Rhino .3dm file: meshes, curves, NURBS surfaces, points, layers, names, colours, materials, groups and User Text.\"\"\"
+
+Press __Export 3dm__ (the node does not write on cook). __Check Attributes__ shows what would be written without
+writing. The report (and the read-back check) is on the *Report* tab.
 
 @attributes
 
 | Houdini | Rhino |
 |---|---|
-| `s@layer` | layer with hierarchy (`Parent::Child`) |
+| `s@layer` | layer with hierarchy (`Parent::Child`); unchanged imported layers go back to their original names |
 | `s@name` | object name |
-| `v@Cd` | object colour |
-| primitive groups | Rhino groups |
-| `d@user_text` and listed attributes (`id`, `thickness`, `category`...) | User Text |
-| `s@material` | Rhino material (mapping table on the node) |
+| `v@Cd`, `f@Alpha` | object colour (equal to the layer colour -> "By Layer") |
+| primitive groups | Rhino groups (service groups `h3dm_type_*`, `rhino_*` never) |
+| `d@user_text` and User Text attributes of the import, plus __User Text Attributes__ | User Text (attributes win over the dictionary) |
+| `s@material` | Rhino material (mapping table on the node, else the imported material) |
 | `s@text` on points | Text dots |
+| `s@rhino_id` | object id kept when it is still unique |
 
-NURBS surfaces are written as untrimmed surfaces; with __Trim Curves__ their boundary curves are written next to them.
+@objects What becomes a Rhino object
 
-Input 2 (*Xform*, optional): the *Xform* output of H3DM 3dm Import. The shift is added back in double precision,
-so the file lands in the original Rhino coordinates.
-Use __H3DM > Create Attribute Template__ for a ready-made Primitive Wrangle.
+* Closed polygons: one mesh per Rhino object of the import (`rhino_id`, or `rhino_instance_id` + `rhino_part_path`
+  for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
+* Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
+* NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini).
+* Trimmed NURBS faces (`rhino_trimmed_exact`): meshes for now (Houdini Convert respects the trims). Writing
+  unchanged Breps exactly and rebuilding changed ones in Rhino come in the next 0.4 steps.
+* Faces imported without trim data (`rhino_trimmed_surfaces`) are not exported: re-import after Prepare in Rhino.
+* Packed primitives are unpacked; each part becomes its own object (blocks come in the next 0.4 step).
+* Points without primitives: text dots (`s@text`), points or point clouds (one per `rhino_id`).
+
+@xform Coordinates and units
+
+The geometry goes back to the Rhino coordinates in one double-precision step: origin, axes and scale from
+`h3dm_xform`, then the file units. Input 2 (*Xform* output of the import) always wins; if it is connected but
+carries no `h3dm_xform`, the export stops. Without input 2 the `h3dm_xform` detail of input 1 is used; without
+any transform, __Scene Unit__ and __Y-Up__ apply (no shift). __Model Units__ = *As Imported* keeps the units of
+the original file.
+
+@safety Writing
+
+The file is written to a temporary file next to the target and then renamed. An existing file is not replaced:
+a new version `<name>_v###.3dm` is written unless __Overwrite Existing File__ is on. The imported file and its
+prepared copy are protected separately (__Allow Overwriting the Source File__).
 """
 
 HELP_EXPORT_RU = u"""= H3DM 3dm Export =
@@ -275,25 +299,49 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
 #internal: h3dm::3dm_export
 #icon: SOP/rop_geometry
 
-\"\"\"Записывает геометрию Houdini в файл Rhino .3dm (экспорт появится в H3DM 0.4).\"\"\"
+\"\"\"Записывает геометрию Houdini в файл Rhino .3dm: сетки, кривые, NURBS-поверхности, точки, слои, имена, цвета, материалы, группы и User Text.\"\"\"
+
+Запись — кнопкой __Export 3dm__ (нода не пишет файл при готовке). __Check Attributes__ показывает, что будет
+записано, ничего не записывая. Отчёт (и контрольное чтение) — на вкладке *Report*.
 
 @attributes
 
 | Houdini | Rhino |
 |---|---|
-| `s@layer` | слой с иерархией (`Родитель::Потомок`) |
+| `s@layer` | слой с иерархией (`Родитель::Потомок`); неизменённые слои импорта получают исходные имена |
 | `s@name` | имя объекта |
-| `v@Cd` | цвет объекта |
-| группы примитивов | группы Rhino |
-| `d@user_text` и перечисленные атрибуты (`id`, `thickness`, `category`...) | User Text |
-| `s@material` | материал Rhino (таблица соответствий на ноде) |
+| `v@Cd`, `f@Alpha` | цвет объекта (совпадает с цветом слоя -> «По слою») |
+| группы примитивов | группы Rhino (служебные `h3dm_type_*`, `rhino_*` — никогда) |
+| `d@user_text` и атрибуты User Text импорта, плюс __User Text Attributes__ | User Text (атрибуты важнее словаря) |
+| `s@material` | материал Rhino (таблица на ноде, иначе материал импорта) |
 | `s@text` на точках | текстовые метки (TextDot) |
+| `s@rhino_id` | id объекта сохраняется, пока он уникален |
 
-NURBS-поверхности пишутся необрезанными; с галочкой __Trim Curves__ рядом пишутся кривые их границ.
+@objects Что становится объектом Rhino
 
-Вход 2 (*Xform*, необязательный): выход *Xform* ноды H3DM 3dm Import. Сдвиг возвращается в двойной точности —
-файл встаёт в исходные координаты Rhino.
-Готовый Primitive Wrangle — __H3DM > Create Attribute Template__.
+* Замкнутые полигоны: одна сетка на объект Rhino импорта (`rhino_id`, у частей блоков — `rhino_instance_id` +
+  `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.
+* Открытые полигоны — полилинии. NURBS-кривые — точные NURBS (замкнутые кривые Houdini — периодические).
+* NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini).
+* Обрезанные NURBS-грани (`rhino_trimmed_exact`) пока пишутся сетками (Convert Houdini учитывает обрезку). Точный
+  перенос неизменённых Brep и пересборка изменённых в Rhino — следующие этапы 0.4.
+* Грани, импортированные без данных обрезки (`rhino_trimmed_surfaces`), не экспортируются: импортируйте файл
+  после Prepare in Rhino.
+* Packed-примитивы раскрываются; каждая часть — свой объект (блоки — следующий этап 0.4).
+* Точки без примитивов: текстовые метки (`s@text`), точки или облака точек (одно на `rhino_id`).
+
+@xform Координаты и единицы
+
+Геометрия возвращается в координаты Rhino одним шагом в двойной точности: origin, оси и масштаб из `h3dm_xform`,
+затем единицы файла. Вход 2 (выход *Xform* импорта) главнее всего; если он подключён без `h3dm_xform`, экспорт
+останавливается. Без входа 2 берётся detail `h3dm_xform` входа 1; без трансформа — __Scene Unit__ и __Y-Up__
+(без сдвига). __Model Units__ = *As Imported* сохраняет единицы исходного файла.
+
+@safety Запись
+
+Файл пишется во временный рядом и затем переименовывается. Существующий файл не заменяется: пишется новая версия
+`<имя>_v###.3dm`, если не включено __Overwrite Existing File__. Импортированный файл и его подготовленная копия
+защищены отдельно (__Allow Overwriting the Source File__).
 """
 
 

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.4.0-dev.1 — 2026-10-05
+Export, step 1 of 0.4 (decisions from the 0.3.0 review): meshes, curves, untrimmed surfaces, attributes and the
+global transform. Not a release yet: blocks, exact Breps and rebuilding trimmed faces in Rhino follow.
+* **H3DM 3dm Export works** (button *Export 3dm*, *Check Attributes*, report with read-back check):
+  closed polygons -> meshes (one per Rhino object: `rhino_id`, block parts by `rhino_instance_id` +
+  `rhino_part_path`, new geometry by connectivity; n-gons divided), open polygons -> polylines, NURBS curves ->
+  exact NURBS (closed -> periodic), NURBS surfaces -> exact untrimmed surfaces, points -> text dots / points /
+  point clouds. Other primitive types are converted to polygons; packed primitives are unpacked (each part its own
+  object).
+* **Trimmed faces** are meshed for now (Houdini Convert respects the trims, warning in the report); faces imported
+  without trim data (`rhino_trimmed_surfaces`) are never written as untrimmed surfaces. "Surface + boundary
+  curves" is gone from the export.
+* **Coordinates:** one inverse transform in double precision (origin, axes, scale) plus the file units; a connected
+  input 2 always wins and must carry `h3dm_xform`; otherwise the detail of input 1; otherwise scene units by
+  parameters. Mesh vertices are written in double precision (`AddPoint3d`; `Add` rounded far models to cm).
+  Test: a model 2,267 km away comes back within 0.01 mm; the same in meters.
+* **Attributes:** unchanged imported names (layers, objects, materials, groups, User Text keys) go back to the
+  originals via the new detail `h3dm_export_names`; renamed or new names are written as they are. User Text
+  attributes of the import win over `d@user_text`; numeric attributes at their default are not added to objects
+  that did not have the key. Service attributes and groups (`h3dm_type_*`, `rhino_*`, `h3dm_*`, `LL*`, `*_orig`)
+  are never exported. The whole imported layer table is kept (colors, visibility, locking, layer User Text);
+  object colour equal to the layer colour is written "By Layer"; Document User Text is restored.
+* **Safe writing:** temporary file + rename; an existing file gets a new version `_v###` unless *Overwrite*; the
+  imported file and its prepared copy need *Allow Overwriting the Source File*. Degenerate mesh faces are removed.
+* **Fix (import, since 0.3.0):** string and dictionary attributes with one value for all elements (one layer in
+  the file, *Pack per Object*, block definitions) came out empty: Houdini does not apply string/dict attribute
+  defaults. Values are written explicitly again; regression `run_constant_attribs`.
+* Tests: `tests/rt_compare.py` (attributes, boxes from render meshes, shape deviation of curves/surfaces incl.
+  block insertions), regression sections `export` and `export new geometry`.
+
 ## 0.3.2 — 2026-10-05
 Fixes from the review of 0.3.0 (export 0.4 preconditions).
 * **Trim Curve Tolerance in model space.** Rational trims were sampled by their deviation in UV, so a stretched

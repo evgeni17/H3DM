@@ -25,6 +25,7 @@ ensure_vendor_path()
 
 _CACHE = {}          # (путь, mtime, размер) -> File3dm
 _CACHE_MAX = 2
+_FILE_PATH = {}      # id(File3dm) -> путь (файл источника для экспорта: защита от перезаписи)
 
 GROUP_TRIM = "rhino_trim_curves"
 GROUP_TRIMMED = "rhino_trimmed_surfaces"      # обрезанная грань, пришедшая БЕЗ обрезки (+ кривые границ)
@@ -124,6 +125,7 @@ def open_file(path):
     f = _CACHE.get(key)
     if f is None:
         f = rhino_read.read(path)
+        _FILE_PATH[id(f)] = os.path.abspath(path)
         if len(_CACHE) >= _CACHE_MAX:
             _CACHE.pop(next(iter(_CACHE)))
         _CACHE[key] = f
@@ -241,11 +243,8 @@ def _attr(geo, cls, name, default):
 
 
 def _set_strings(geo, cls, name, values):
-    finder = geo.findPrimAttrib if cls == hou.attribType.Prim else geo.findPointAttrib
-    if values and finder(name) is None and values.count(values[0]) == len(values):
-        # одно значение на все элементы (packed-объект): атрибут со значением по умолчанию — в разы быстрее
-        geo.addAttrib(cls, name, values[0])
-        return
+    # ВНИМАНИЕ: значение по умолчанию у строковых и dict-атрибутов Houdini НЕ применяется к элементам
+    # (проверено в 22.0: addAttrib(..., "abc") даёт ""), поэтому значения пишутся всегда явно
     _attr(geo, cls, name, "")
     if cls == hou.attribType.Prim:
         geo.setPrimStringAttribValues(name, values)
@@ -301,12 +300,8 @@ def _set_dicts_indexed(geo, cls, name, table, idx):
         _set_dicts(geo, cls, name, [table[i] for i in idx.tolist()])
         return
     used = np.unique(idx)
-    if len(used) == 1:
-        v = table[int(used[0])]
-        if geo.findPrimAttrib(name) if cls == hou.attribType.Prim else geo.findPointAttrib(name):
-            _set_dicts(geo, cls, name, [v] * n)
-        else:
-            geo.addAttrib(cls, name, v)       # одно значение на все элементы — значение по умолчанию
+    if len(used) == 1 and not table[int(used[0])]:
+        _attr(geo, cls, name, {})             # все пустые — достаточно самого атрибута
         return
     prim = cls == hou.attribType.Prim
     src = hou.Geometry()
@@ -1259,6 +1254,27 @@ def _cook_info(node, geo, f, opt, gx, naming):
 
 # ---------------------------------------------------------------- документ
 
+def export_name_maps(f, naming):
+    """{'layers': {путь Houdini: путь Rhino}, 'names': {...}, 'groups': {...}, 'keys': {атрибут: ключ User Text}}."""
+    out = {"layers": {}, "names": {}, "groups": {}, "keys": {}, "layersep": naming.opt.layersep or "::"}
+    for l in f.Layers:
+        out["layers"][naming.layer(l.FullPath)] = l.FullPath
+    for o in f.Objects:
+        a = o.Attributes
+        if a.Name:
+            out["names"][naming.name(a.Name)] = a.Name
+        if a.UserStringCount:
+            for k, _ in a.GetUserStrings():
+                out["keys"][naming.key(k)] = k
+    for m in f.Materials:
+        if m.Name:
+            out["names"][naming.name(m.Name)] = m.Name
+    for g in f.Groups:
+        nm = g.Name or ("Group%d" % g.Index)
+        out["groups"][naming.group(nm)] = nm
+    return out
+
+
 def write_document(geo, f, naming=None):
     from . import rhino_read
     d = rhino_read.doc_info(f)
@@ -1275,6 +1291,10 @@ def write_document(geo, f, naming=None):
     _detail(geo, "rhino_blocks", _clean(rhino_read.instance_definitions(f)) or [{}])
     if naming is not None and naming.m.map:
         _detail(geo, "h3dm_name_map", dict(naming.m.map))
+    if naming is not None:
+        # для экспорта: имя в Houdini -> исходное имя Rhino (если имя не меняли — вернётся оригинал)
+        _detail(geo, "h3dm_export_names", _clean(export_name_maps(f, naming)))
+    _detail(geo, "rhino_file", _FILE_PATH.get(id(f), ""))
 
 
 def info_text(kwargs):

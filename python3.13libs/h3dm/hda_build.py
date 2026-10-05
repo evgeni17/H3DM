@@ -257,14 +257,25 @@ def _export_ptg():
     g.append(hou.ButtonParmTemplate("reveal", "Reveal File", script_callback="import h3dm.sop_export as m; m.reveal_file(kwargs)",
                                     script_callback_language=PY))
     g.append(_menu("version", "Rhino Version", [("8", "Rhino 8"), ("7", "Rhino 7"), ("6", "Rhino 6")]))
+    g.append(_toggle("overwrite", "Overwrite Existing File", False, join_with_next=True,
+                     help="Off: if Output 3dm exists, a new version <name>_v###.3dm is written next to it."))
+    g.append(_toggle("allowsource", "Allow Overwriting the Source File", False,
+                     help="The file the geometry was imported from (and its prepared copy) is protected; "
+                          "turn this on to replace it anyway (needs Overwrite Existing File)."))
 
     un = [
-        _menu("unit", "Model Units", [("mm", "Millimeters"), ("cm", "Centimeters"), ("m", "Meters")]),
-        hou.FloatParmTemplate("scale", "Scene Unit (meters)", 1, default_value=(1.0,), min=0.0001, max=1000.0),
-        _toggle("yup", "Y-Up to Z-Up", True),
         _menu("xformsrc", "Global Transform", [("input2", "From Input 2 (Xform), else Input 1 Detail"),
                                                ("detail", "From Input 1 Detail (h3dm_xform)"), ("none", "None")],
-              help="Puts the geometry back to its original Rhino coordinates. The shift is added in double precision."),
+              help="Puts the geometry back to its original Rhino coordinates, units and axes in one double-precision "
+                   "step. A connected input 2 always wins; if it carries no h3dm_xform the export stops. Without "
+                   "a transform, Scene Unit and Y-Up below are used."),
+        _menu("unit", "Model Units", [("source", "As Imported (from the transform)"), ("mm", "Millimeters"),
+                                      ("cm", "Centimeters"), ("m", "Meters"), ("in", "Inches"), ("ft", "Feet")],
+              help="Units of the written file. As Imported = the units of the original Rhino file (millimeters "
+                   "without a transform)."),
+        hou.FloatParmTemplate("scale", "Scene Unit (meters)", 1, default_value=(1.0,), min=0.0001, max=1000.0,
+                              help="Only without h3dm_xform: meters per Houdini unit."),
+        _toggle("yup", "Y-Up to Z-Up", True, help="Only without h3dm_xform."),
     ]
     g.append(_folder("units_f", "Units", un))
 
@@ -273,23 +284,37 @@ def _export_ptg():
         hou.StringParmTemplate("layersep", "Layer Separator", 1, default_value=("::",)),
         hou.StringParmTemplate("defaultlayer", "Default Layer", 1, default_value=("Houdini",)),
         hou.StringParmTemplate("nameattrib", "Name Attribute", 1, default_value=("name",)),
-        _menu("splitby", "Split Objects By", [("attrib", "Attribute"), ("connectivity", "Connectivity"), ("prim", "Primitive")]),
+        _menu("splitby", "Split Polygons By", [("auto", "Rhino Object (rhino_id + block part), else Connectivity"),
+                                                ("attrib", "Attribute"), ("connectivity", "Connectivity"),
+                                                ("prim", "Primitive")],
+              help="Which polygons form one Rhino mesh. Curves and NURBS surfaces are always one object each. "
+                   "Rhino Object: parts of an expanded block (same rhino_id) stay separate via "
+                   "rhino_instance_id + rhino_part_path; new geometry without rhino_id is split by connectivity."),
         hou.StringParmTemplate("splitattrib", "Split Attribute", 1, default_value=("rhino_id",),
-                               help="Primitives with the same value become one Rhino object. Falls back to name, then path.",
+                               help="Polygons with the same value become one Rhino mesh; empty values: connectivity.",
                                conditionals={HIDE: "{ splitby != attrib }"}),
         _toggle("restorenames", "Restore Original Names", True,
-                help="Uses layer_orig / name_orig and detail h3dm_name_map to write the original (e.g. Cyrillic) names."),
+                help="Names that are unchanged since the import (layers, objects, materials, groups, User Text keys) "
+                     "go back to the original Rhino names (e.g. Cyrillic), from detail h3dm_export_names. "
+                     "Renamed or new names are written as they are."),
+        _toggle("doctext", "Write Document User Text", True, help="From detail rhino_doc_text of the import."),
+        _toggle("alllayers", "Keep All Imported Layers", True,
+                help="Write the whole layer table of the import (with colors, visibility, locking, layer User Text), "
+                     "also layers that have no objects in Houdini."),
     ]
     g.append(_folder("struct_f", "Structure", st))
 
     at = [
         _toggle("color", "Object Color from Cd", True),
         _toggle("layercolor", "Layer Color from First Object", False),
-        hou.StringParmTemplate("groups", "Groups", 1, default_value=("* ^rhino_*",),
-                               help="Primitive groups to write as Rhino groups (globs, ^ excludes)."),
+        hou.StringParmTemplate("groups", "Groups", 1, default_value=("* ^rhino_* ^h3dm_*",),
+                               help="Primitive groups to write as Rhino groups (globs, ^ excludes). Service groups "
+                                    "(h3dm_type_*, rhino_*) are never written."),
         hou.StringParmTemplate("utdict", "User Text Dict Attribute", 1, default_value=("user_text",)),
         hou.StringParmTemplate("utattribs", "User Text Attributes", 1, default_value=("",),
-                               help="Primitive attribute globs written as User Text, e.g. id thickness category"),
+                               help="More primitive attributes written as User Text (globs), e.g. id thickness. "
+                                    "Attributes made from User Text by the import are always written back and "
+                                    "win over the dictionary; service attributes (rhino_*, h3dm_*, LL0.., *_orig) never."),
         hou.SeparatorParmTemplate("sep_mat"),
         hou.StringParmTemplate("matattrib", "Material Attribute", 1, default_value=("material",)),
     ]
@@ -304,13 +329,20 @@ def _export_ptg():
     g.append(_folder("attr_f", "Attributes", at))
 
     ge = [
-        _toggle("trimcurves", "Write Boundary Curves (Trim Curves)", True,
-                help="NURBS surfaces are written untrimmed; their boundary curves (group rhino_trim_curves, or the "
-                     "surface outline) are written next to them on the same layer and in the same group."),
-        _menu("curves", "Curves", [("nurbs", "NURBS Curves"), ("poly", "Polylines")]),
+        _menu("trimmed", "Trimmed Surfaces", [("mesh", "Convert to Mesh"), ("skip", "Skip")],
+              help="Trimmed NURBS faces (group rhino_trimmed_exact). Exact Brep transfer of unchanged objects and "
+                   "rebuilding changed ones in Rhino come in the next 0.4 steps; until then they are meshed "
+                   "(Houdini Convert respects the trims). Faces imported without trim data "
+                   "(rhino_trimmed_surfaces) are never exported as untrimmed surfaces."),
+        hou.FloatParmTemplate("meshlod", "Mesh Level of Detail", 1, default_value=(4.0,), min=0.5, max=32.0,
+                              conditionals={HIDE: "{ trimmed != mesh }"},
+                              help="Convert LOD for trimmed faces (divisions per span)."),
         _toggle("textdots", "Points with s@text to Text Dots", True),
-        _toggle("points", "Other Points to Point Objects", False),
-        _menu("packed", "Packed Primitives", [("blocks", "Blocks"), ("explode", "Explode to Objects")]),
+        _toggle("points", "Other Points to Point Objects", True,
+                help="Points without primitives; several points with one rhino_id become a point cloud."),
+        hou.LabelParmTemplate("packed_note", "Packed", column_labels=(
+            "Packed primitives are unpacked (with their attributes); writing them as blocks comes in the next "
+            "0.4 step.",)),
     ]
     g.append(_folder("geo_f", "Geometry", ge))
 
