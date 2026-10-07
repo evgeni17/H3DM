@@ -4,6 +4,7 @@ vendor/*
 # тестовые данные пользователя и результаты
 tests/private/
 tests/out/
+tests/rhino/
 *.png
 !docs/*.png
 # служебное

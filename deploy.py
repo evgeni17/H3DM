@@ -16,7 +16,8 @@ import shutil
 import sys
 
 SRC = os.path.dirname(os.path.abspath(__file__))
-SKIP_DIRS = {".git", "__pycache__", "backup", os.path.join("tests", "private"), os.path.join("tests", "out")}
+SKIP_DIRS = {".git", "__pycache__", "backup", os.path.join("tests", "private"), os.path.join("tests", "out"),
+             os.path.join("tests", "rhino")}
 SKIP_FILES = {".DS_Store", ".gitignore", ".gitattributes", "deploy.py"}
 
 
