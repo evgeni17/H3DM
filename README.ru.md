@@ -1,5 +1,7 @@
 # H3DM — импорт и экспорт Rhino .3dm для Houdini
 
+![H3DM: Rhino → Houdini → Rhino](docs/h3dm_banner.png)
+
 H3DM добавляет в SideFX Houdini импорт и экспорт файлов Rhino `.3dm` — две SOP-ноды. Работает через
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT), для чтения файлов Rhino не нужен; необязательная
 *подготовка в Rhino* использует запущенный Rhino 8 для файлов без сеток отображения и для точных обрезанных NURBS.
