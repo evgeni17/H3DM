@@ -112,7 +112,28 @@ def seal(version):
     with open(man, "w", encoding="utf-8") as fh:
         for f in files:
             fh.write("%s  %s\n" % (_sha(os.path.join(ROOT, f)), f.replace(os.sep, "/")))
+    _record(version, pkg)
     print("Sealed %s: %d files" % (pkg, len(files)))
+
+
+def _record(version, pkg):
+    """VERSIONS.json: запись замороженной версии — версия плагина, rhino3dm и Houdini, с которыми её проверяли."""
+    import json
+    init = open(os.path.join(LIBS, pkg, "__init__.py"), encoding="utf-8").read()
+
+    def const(name):
+        m = re.search(r'^%s = "([^"]*)"' % name, init, re.M)
+        return m.group(1) if m else ""
+    path = os.path.join(ROOT, "VERSIONS.json")
+    data = json.load(open(path, encoding="utf-8")) if os.path.isfile(path) else {"assets": {}}
+    entry = data["assets"].get(version, {})
+    entry.update({"status": "frozen", "plugin": const("__version__"), "package": pkg,
+                  "rhino3dm": const("RHINO3DM_TESTED") or entry.get("rhino3dm", ""),
+                  "houdini": const("HOUDINI_TESTED") or entry.get("houdini", ""), "python": "3.13"})
+    data["assets"][version] = entry
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, ensure_ascii=False)
+        fh.write("\n")
 
 
 def verify(version):

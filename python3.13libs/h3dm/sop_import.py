@@ -710,6 +710,8 @@ def cook(node, output=0):
     from . import has_rhino3dm
     if not has_rhino3dm():
         raise hou.NodeError("rhino3dm is not installed. Run H3DM > Install / Update rhino3dm.")
+    from . import rhino3dm_warning
+    vw = rhino3dm_warning()               # другая версия rhino3dm — в общее предупреждение ноды
     opt = read_options(owner)
     # дисковый кэш: ключ строится ДО чтения файла (файл при попадании не читается вовсе)
     key = None
@@ -722,8 +724,9 @@ def cook(node, output=0):
         else:
             ok, meta = geocache.load(geo, key, cdir)
             if ok:
-                if (meta or {}).get("warning"):
-                    node.addWarning(meta["warning"])
+                text = "\n".join(x for x in (vw, (meta or {}).get("warning")) if x)
+                if text:
+                    node.addWarning(text)
                 return
     t0 = time.time()
     try:
@@ -741,13 +744,15 @@ def cook(node, output=0):
         pt = geo.createPoint()
         _write_xform(geo, gx, hou.attribType.Point, pt)
         _write_xform(geo, gx)
-        if warning:
-            node.addWarning(warning)
+        if warning or vw:
+            node.addWarning("\n".join(x for x in (vw, warning) if x))
     else:
         naming = Naming(opt, f)
         if output == 1:
             _cook_info(node, geo, f, opt, gx, naming)
             warning = None
+            if vw:
+                node.addWarning(vw)
         else:
             warning = _cook_geometry(node, geo, f, opt, gx, naming)
     if key is not None and time.time() - t0 >= float(_ev(owner, "cachemin", 0.5)):
@@ -825,7 +830,9 @@ def _cook_geometry(node, geo, f, opt, gx, naming):
     groups = _emit(geo, b, objs, ctx)
     write_document(geo, f, naming)
     _write_xform(geo, gx)
-    warns = ([gx.warning] if getattr(gx, "warning", None) else []) + list(naming.m.warnings)
+    from . import rhino3dm_warning
+    warns = ([rhino3dm_warning()] if rhino3dm_warning() else []) + \
+        ([gx.warning] if getattr(gx, "warning", None) else []) + list(naming.m.warnings)
     st = ctx.stats
     if st.get("faces_without_mesh"):
         warns.append("%d trimmed faces have no render mesh in the file (saved with Save Small?) and were skipped. "

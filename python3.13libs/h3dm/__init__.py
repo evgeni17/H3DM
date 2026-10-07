@@ -21,6 +21,12 @@ FROZEN = False            # True в замороженной копии
 IMPORT_TYPE = "h3dm::3dm_import::" + HDA_VERSION
 EXPORT_TYPE = "h3dm::3dm_export::" + HDA_VERSION
 
+# Проверенное окружение этой версии (полная таблица по версиям ассетов — VERSIONS.json в корне плагина).
+# Меню H3DM > Install / Update rhino3dm ставит именно RHINO3DM_TESTED; при другой установленной версии ноды
+# предупреждают. В одной сессии Houdini загружается одна rhino3dm на все версии ассетов.
+RHINO3DM_TESTED = "8.35.0"
+HOUDINI_TESTED = "22.0.429"
+
 # корень плагина: .../H3DM  (этот файл: .../H3DM/python3.13libs/h3dm/__init__.py)
 ROOT = os.environ.get("H3DM") or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -55,3 +61,27 @@ def has_rhino3dm():
         return True
     except Exception:
         return False
+
+
+def rhino3dm_version():
+    """Установленная версия rhino3dm ('' — нет)."""
+    try:
+        from importlib import metadata
+        return metadata.version("rhino3dm")
+    except Exception:
+        pass
+    try:
+        import rhino3dm
+        return str(getattr(rhino3dm, "__version__", "") or "")
+    except Exception:
+        return ""
+
+
+def rhino3dm_warning():
+    """Текст предупреждения, если установлена не та rhino3dm, с которой проверена эта версия H3DM."""
+    v = rhino3dm_version()
+    if v and v != RHINO3DM_TESTED:
+        return ("rhino3dm %s is installed; H3DM %s (assets %s) was tested with %s. Results may differ — "
+                "H3DM > Install / Update rhino3dm installs the tested version." % (v, __version__, HDA_VERSION,
+                                                                                  RHINO3DM_TESTED))
+    return ""

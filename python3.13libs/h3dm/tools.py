@@ -63,11 +63,16 @@ def export_selected(kwargs=None):
 
 
 def install_deps(kwargs=None):
-    from . import deps, has_rhino3dm
+    from . import deps, RHINO3DM_TESTED, rhino3dm_version
+    cur = rhino3dm_version()
+    if cur == RHINO3DM_TESTED:
+        hou.ui.displayMessage("rhino3dm %s is installed — the version this H3DM was tested with." % cur, title="H3DM")
+        return
     try:
-        with hou.InterruptableOperation("H3DM: installing rhino3dm", open_interrupt_dialog=True):
-            target = deps.install(upgrade=has_rhino3dm())
-        hou.ui.displayMessage("rhino3dm installed to:\n%s\n\nRestart Houdini if import still fails." % target, title="H3DM")
+        with hou.InterruptableOperation("H3DM: installing rhino3dm %s" % RHINO3DM_TESTED, open_interrupt_dialog=True):
+            target = deps.install()
+        hou.ui.displayMessage("rhino3dm %s installed to:\n%s\n\n%sRestart Houdini so that the new version is loaded."
+                              % (RHINO3DM_TESTED, target, ("(was %s)\n" % cur) if cur else ""), title="H3DM")
     except Exception as ex:
         hou.ui.displayMessage("Install failed:\n%s" % ex, title="H3DM", severity=hou.severityType.Error)
 
@@ -80,8 +85,12 @@ def rebuild_hdas(kwargs=None):
 def about(kwargs=None):
     from . import deps
     st = deps.status()
-    msg = ("H3DM %s — Rhino .3dm import/export for Houdini\nRoot: %s\n\nrhino3dm: %s %s\nvendor: %s\nPython: %s"
-           % (__version__, ROOT, "OK" if st["rhino3dm"] else "NOT FOUND", st["version"], st["vendor"], st["python"]))
+    from . import HDA_VERSION, HOUDINI_TESTED
+    msg = ("H3DM %s — Rhino .3dm import/export for Houdini (assets %s)\nRoot: %s\n\nrhino3dm: %s %s (tested: %s%s)\n"
+           "vendor: %s\nPython: %s\nHoudini: %s (tested: %s)\n\nVersions of all installed assets: VERSIONS.json"
+           % (__version__, HDA_VERSION, ROOT, "OK" if st["rhino3dm"] else "NOT FOUND", st["version"], st["tested"],
+              "" if st["match"] else " — differs", st["vendor"], st["python"], hou.applicationVersionString(),
+              HOUDINI_TESTED))
     hou.ui.displayMessage(msg, title="H3DM")
 
 

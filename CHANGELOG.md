@@ -9,6 +9,11 @@ Asset versions follow the release; nodes in working scenes never change.
   its own Rhino scripts, so working scenes cook exactly as before whatever changes in development.
 * `freeze.py` (freeze / `--seal` / `--verify`) makes and guards frozen versions; `tests/test_frozen.py` checks the
   checksums and that the development version is above all frozen ones; Houdini regression `run_versions`.
+* **Dependency versions:** `RHINO3DM_TESTED` (8.35.0) and `HOUDINI_TESTED` (22.0.429) in `h3dm/__init__.py`;
+  `VERSIONS.json` lists, for every asset version, the plugin version, rhino3dm, Houdini and Python it was tested
+  with (`freeze.py --seal` records frozen versions). **H3DM › Install / Update rhino3dm** installs exactly the tested
+  rhino3dm (no silent upgrade to the newest 8.x); import and export warn if another version is installed;
+  *About* shows tested vs installed.
 * Development continues as `::4.0`; the old unversioned HDA files `h3dm_3dm_import.hda` / `h3dm_3dm_export.hda`
   are replaced by the versioned files.
 

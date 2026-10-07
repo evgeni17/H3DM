@@ -1435,6 +1435,21 @@ def run_versions():
                 fails.append("%s export button: %s" % (tn, e.parm("export").parmTemplate().scriptCallback()))
         if "h3dm::3dm_import::1.0" not in names:
             fails.append("frozen h3dm::3dm_import::1.0 is not installed")
+        # rhino3dm: установлена проверенная версия; при другой — предупреждение на ноде
+        if h3dm.rhino3dm_version() != h3dm.RHINO3DM_TESTED:
+            fails.append("rhino3dm %s installed, tested %s" % (h3dm.rhino3dm_version(), h3dm.RHINO3DM_TESTED))
+        saved = h3dm.RHINO3DM_TESTED
+        h3dm.RHINO3DM_TESTED = "0.0.1"
+        try:
+            w = tmp.createNode("h3dm::3dm_import")
+            w.parm("file").set(os.path.join(FX, "h3dm_fixture_prepared_v001.3dm"))
+            w.parm("diskcache").set(0)
+            w.cook(force=True)
+            ws = list(w.warnings()) + list(w.node("GEO").warnings())
+            if not any("was tested with 0.0.1" in x for x in ws):
+                fails.append("no rhino3dm version warning: %s" % (ws,))
+        finally:
+            h3dm.RHINO3DM_TESTED = saved
     finally:
         tmp.destroy()
     print("houdini_regression versions: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))

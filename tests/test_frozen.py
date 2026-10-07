@@ -22,6 +22,19 @@ cur = re.search(r'^HDA_VERSION = "([^"]+)"', init, re.M).group(1)
 key = lambda s: tuple(int(x) for x in s.split("."))
 if versions and key(cur) <= max(key(v) for v in versions):
     FAIL.append("current HDA_VERSION %s is not above frozen %s" % (cur, versions))
+# VERSIONS.json: каждая версия ассетов описана; у разрабатываемой — rhino3dm/Houdini как в h3dm/__init__.py
+import json
+vj = json.load(open(os.path.join(root, "VERSIONS.json"), encoding="utf-8"))["assets"]
+for v in versions:
+    e = vj.get(v)
+    if not e or e.get("status") != "frozen" or not e.get("rhino3dm") or not e.get("houdini"):
+        FAIL.append("VERSIONS.json: frozen %s not described: %s" % (v, e))
+e = vj.get(cur) or {}
+for key_, const in (("rhino3dm", "RHINO3DM_TESTED"), ("houdini", "HOUDINI_TESTED")):
+    m = re.search(r'^%s = "([^"]+)"' % const, init, re.M)
+    if not m or e.get(key_) != m.group(1):
+        FAIL.append("VERSIONS.json %s %s = %s, h3dm/__init__.py %s = %s" % (cur, key_, e.get(key_), const,
+                                                                          m.group(1) if m else None))
 print("test_frozen: %s (frozen: %s, current: %s)" % ("OK" if not FAIL else "FAILED\n  " + "\n  ".join(FAIL),
                                                     ", ".join(versions) or "-", cur))
 raise SystemExit(1 if FAIL else 0)

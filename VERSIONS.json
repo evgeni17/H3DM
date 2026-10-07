@@ -1,0 +1,24 @@
+{
+  "_comment": "Versions of H3DM node assets and the environment each was tested with. A frozen version never changes; install the rhino3dm listed for the newest version you use (one rhino3dm is loaded per Houdini session for all asset versions). Updated by freeze.py --seal; the development entry follows h3dm/__init__.py.",
+  "assets": {
+    "1.0": {
+      "status": "frozen",
+      "plugin": "0.4.0-dev.6",
+      "package": "h3dm_1_0",
+      "rhino3dm": "8.35.0",
+      "houdini": "22.0.429",
+      "python": "3.13",
+      "rhino": "8 (Prepare in Rhino, rebuild of trimmed faces)",
+      "note": "All nodes made before asset versioning (H3DM 0.3.x - 0.4.0-dev.6)."
+    },
+    "4.0": {
+      "status": "development",
+      "plugin": "0.4.0",
+      "package": "h3dm",
+      "rhino3dm": "8.35.0",
+      "houdini": "22.0.429",
+      "python": "3.13",
+      "rhino": "8 (Prepare in Rhino, rebuild of trimmed faces)"
+    }
+  }
+}

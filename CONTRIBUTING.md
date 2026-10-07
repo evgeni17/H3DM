@@ -37,3 +37,9 @@ python tests/test_frozen.py      # frozen versions unchanged, current version ab
 
 A fix that must reach scenes already made with a released version is a new asset version, never an edit of the
 frozen copy.
+
+**Dependencies.** `RHINO3DM_TESTED` / `HOUDINI_TESTED` in `h3dm/__init__.py` say what the current version was tested
+with; `VERSIONS.json` keeps that for every asset version (`freeze.py --seal` records it; `tests/test_frozen.py`
+checks it). The install menu installs exactly `RHINO3DM_TESTED`, and nodes warn about another version. To move to a
+new rhino3dm: install it, run the whole Houdini regression (it cooks every installed asset version), then raise
+`RHINO3DM_TESTED` and add `"also_tested": ["<version>"]` to the frozen entries that passed.

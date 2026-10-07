@@ -843,6 +843,9 @@ def collect(node):
     src = node.input(0).geometry()
     plan = Plan()
     warn = plan.warnings
+    from . import rhino3dm_warning
+    if rhino3dm_warning():
+        warn.append(rhino3dm_warning())
     gx = resolve_xform(node, src, warn)
     unit_name, unit_m, factor = output_units(node, gx)
     plan.units = unit_name

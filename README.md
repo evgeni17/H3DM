@@ -60,12 +60,17 @@ version side by side; the Tab menu creates the newest one, and nodes already in 
   `tests/test_frozen.py` guard this.
 * `::1.0` — all nodes made before versioning (H3DM 0.3.x – 0.4.0-dev.6), frozen with the 0.4.0-dev.6 code.
 * To move a node to a newer version: create the new node and copy the parameters; Houdini does not upgrade it
-  silently. The frozen versions share `vendor/rhino3dm`.
+  silently. The frozen versions share `vendor/rhino3dm`; the versions each one was tested with are in
+  `VERSIONS.json`.
 
 ## Requirements
 
 * Houdini 22 (Python 3.13).
-* rhino3dm 8.x, installed into the plugin's `vendor/` folder (see below). macOS wheels need macOS 14+.
+* rhino3dm, installed into the plugin's `vendor/` folder (see below). macOS wheels need macOS 14+. Each asset version
+  records the rhino3dm and Houdini it was tested with in [`VERSIONS.json`](VERSIONS.json) (assets 4.0 / H3DM 0.4:
+  **rhino3dm 8.35.0**, Houdini 22.0.429). **H3DM › Install / Update rhino3dm** installs exactly that version, and the
+  nodes show a warning if another one is installed. One rhino3dm is loaded per Houdini session for all asset
+  versions, so use the one listed for the newest version you work with.
 * Optional, for *Prepare in Rhino*: Rhino 8 (Mac or Windows) running on the same computer. If the button cannot
   find it while Rhino is open, run the Rhino command `StartScriptServer`. `rhino/h3dm_prepare.py` can also be run
   by hand in Rhino's Script Editor: it prepares the active document.
