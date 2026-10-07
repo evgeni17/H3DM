@@ -6,7 +6,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
 *Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for trimmed NURBS surfaces.
 
-> **Status: 0.4.0-dev.7 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
+> **Status: 0.4.0-dev.9 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 
@@ -47,6 +47,27 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
   the import has an *Xform* output, the export an *Xform* input that writes back to the original coordinates.
 * **Non-Latin names:** Cyrillic layer, object, group and material names can be transliterated; the originals are
   kept and restored on export.
+
+## Limits of the Rhino rebuild
+
+The rebuild in Rhino is used only for **changed** objects with trimmed faces (unchanged ones and ones moved,
+rotated or scaled as a whole are copied from the source file, also when the export *Xform* differs from the
+import). What to expect from it:
+
+* Every face is rebuilt on its own from the Houdini surface (control points in float32 — after the shift to the
+  origin, about 0.001 mm at 10 m) and its trims (exactly as imported unless edited in Houdini; edited trims come
+  from Houdini's curves, arcs as polylines within *Trim Curve Tolerance*). The faces are then joined in Rhino at the
+  file's tolerance, retried up to 20× that tolerance.
+* Faces that do not meet within 20× the tolerance are **not** moved or patched: the object comes out as several
+  Breps or an open Brep, and the report names it with the number of pieces and naked edges ("are OPEN after rebuilding",
+  "did not join into one Brep"). Example: on a 114-object test model one valid solid came back as 15 Breps
+  with 78 naked edges when everything was forced through the rebuild; in a normal export it is copied from the
+  source.
+* Checked automatically: Brep validity, solid / open compared with the source, naked edges. Not checked: the
+  distance between the rebuilt faces and the Houdini surfaces.
+* Objects that are already invalid in the source file are exported as meshes, with a warning.
+* Speed: about 55 s for 3873 faces when every Brep is rebuilt; a normal export rebuilds only the changed ones.
+* Without a running Rhino 8: exact trimmed planes for planar faces with one outer loop, meshes for the rest.
 
 ## Asset versions
 

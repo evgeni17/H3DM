@@ -9,7 +9,7 @@ import os
 import platform
 import sys
 
-__version__ = "0.4.0.dev8"
+__version__ = "0.4.0.dev9"
 
 # Версия ассетов (часть имени типа ноды h3dm::3dm_import::<версия>). Правило (docs: README, раздел Versions):
 #   релиз 0.N  -> ассеты ::N.0 (0.4 -> 4.0); исправление релиза, меняющее поведение, -> ::N.1 и т.д.;

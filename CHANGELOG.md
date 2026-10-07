@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0-dev.9 — 2026-10-07
+* **Fix (regression of dev.8): unchanged Breps ignored a changed export transform.** The geometry-signature fast
+  path copied the source Brep to its old place even when the *Xform* input (origin, scene scale or axes) differed
+  from the import, so Breps stayed while curves, meshes and points moved. The import now also stores its
+  Rhino -> Houdini matrix (`rhino_geo_sig_xform`); the export composes it with its own transform and writes the
+  source Brep with the exact difference. Signatures without the matrix (imports by dev.8) are not trusted — the
+  full comparison runs. Report line renamed: "placed with an exact transform (... or another global Xform than at
+  import)".
+* Test `run_export_xform_override`: origin +1000 mm, scene scale ×2, Y-up/Z-up switched — every object (Brep,
+  curve, mesh, points) lands where the new transform puts it; fails on dev.8.
+* **Limits of the Rhino rebuild** documented (README, node help): join tolerance up to 20× the file's, objects that
+  stay split or open are reported, not patched; what is and is not checked.
+
 ## 0.4.0-dev.8 — 2026-10-07
 Faster export (real model, 114 Breps / 3873 faces, everything copied from the source file):
 All NURBS 20 s -> 7.4 s, Mesh + Curves 35 s -> 8.7 s; of that, about 4.5 s is rhino3dm writing the 128 MB file.

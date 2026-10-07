@@ -1004,7 +1004,7 @@ def run_export_passthrough():
                     d = [a - b for a, b in zip(box(B[dome].Geometry), box(breps[dome].Geometry))] if dome in B else None
                     if d is None or loops(B[dome].Geometry) != loops(breps[dome].Geometry) or \
                             max(abs(x) for x in (d[0], d[1], d[3], d[4])) > 1e-4 or abs(d[2] - 50) > 1e-4 or \
-                            abs(d[5] - 50) > 1e-4 or "as a whole in Houdini (source Brep + exact transform): 1" not in text:
+                            abs(d[5] - 50) > 1e-4 or "another global Xform than at import): 1" not in text:
                         fails.append("%s: moved dome %s" % (tag, d))
                 lay = B.get(holed)
                 if lay is None or rr.enum_name(lay.Geometry.ObjectType) != "Brep":
@@ -1284,7 +1284,7 @@ def run_export_rhino():
         d = box(B[col].Geometry) - box(S[col].Geometry) if col in B else None
         if d is None or topo(B[col].Geometry) != topo(S[col].Geometry) or abs(d[2] - 100.0) > 1e-6 or abs(d[5] - 100.0) > 1e-6:
             fails.append("rhino moved column: %s %s" % (topo(B[col].Geometry) if col in B else None, d))
-        if "exact transform): 1" not in text or "from the source file (exact Breps): 6" not in text:
+        if "than at import): 1" not in text or "from the source file (exact Breps): 6" not in text:
             fails.append("rhino moved report: %s" % text[-300:])
         # то же без исходника: пересборка в Rhino сдвинутого тела остаётся замкнутой (сшивка с допуском float)
         text, B = export(g, "moved_rebuilt.3dm", passthrough=0)
@@ -1387,7 +1387,7 @@ def run_export_real():
         text, path = se.run(ex, write=True)
         b = {str(o.Attributes.Id): o.Geometry for o in rr.read(path).Objects}.get(rid)
         dz = b.GetBoundingBox().Min.Z - S[rid].GetBoundingBox().Min.Z if b is not None else None
-        if b is None or not b.IsSolid or abs(dz - 100.0) > 1e-3 or "exact transform): 1" not in text:
+        if b is None or not b.IsSolid or abs(dz - 100.0) > 1e-3 or "than at import): 1" not in text:
             fails.append("real moved: solid %s, dz %s" % (b.IsSolid if b is not None else None, dz))
     finally:
         tmp.destroy()
@@ -1549,7 +1549,81 @@ def run_export_scratch():
     return fails
 
 
+def run_export_xform_override():
+    """Другой глобальный трансформ на входе Xform (origin, масштаб сцены, оси): неизменённые Brep (быстрый путь по
+    отпечатку) смещаются вместе с кривыми, сетками и точками, а не остаются на старом месте."""
+    import shutil
+    import tempfile
+    import numpy as np
+    from h3dm import sop_export as se, rhino_read as rr
+    from h3dm.sop_import import xform_from_geometry
+    from h3dm.xform import GlobalXform
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_xf_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_xf")
+    src = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+    S = {str(o.Attributes.Id): o for o in rr.read(src).Objects if not o.Attributes.IsInstanceDefinitionObject}
+    kinds = ("Brep", "Extrusion", "Curve", "Mesh", "PointSet", "Point", "TextDot")
+
+    def center(g):
+        b = g.GetBoundingBox()
+        return np.array([(b.Min.X + b.Max.X) / 2, (b.Min.Y + b.Max.Y) / 2, (b.Min.Z + b.Max.Z) / 2])
+
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(src)
+        imp.parm("geomode").set("all_nurbs")
+        xs = tmp.createNode("stash", "xf")
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, imp, 0)
+        ex.setInput(1, xs)
+        ex.parm("packed").set("explode")
+        g_old = xform_from_geometry(imp.geometry(2))
+        n_breps = sum(1 for o in S.values() if rr.enum_name(o.Geometry.ObjectType) in ("Brep", "Extrusion"))
+        for case in ("same", "origin", "scale", "axes"):
+            xg = hou.Geometry(imp.geometry(2))
+            d = dict(xg.dictAttribValue("h3dm_xform"))
+            if case == "origin":
+                o = [float(v) for v in d["origin_text"].split()]
+                o[0] += 1000.0
+                d["origin"], d["origin_text"] = o, "%.9f %.9f %.9f" % tuple(o)
+            elif case == "scale":
+                d["scale"] = float(d["scale"]) * 2.0
+            elif case == "axes":
+                d["yup"] = 0 if int(d["yup"]) else 1
+            xg.setGlobalAttribValue("h3dm_xform", d)
+            xg.iterPoints()[0].setAttribValue("h3dm_xform", d)
+            xs.parm("stash").set(xg)
+            g_new = GlobalXform.from_dict(d)
+            ex.parm("file").set(os.path.join(out_dir, case + ".3dm"))
+            text, path = se.run(ex, write=True)
+            B = {str(o.Attributes.Id): o for o in rr.read(path).Objects}
+            bad = []
+            for k, o in S.items():
+                kind = rr.enum_name(o.Geometry.ObjectType)
+                if kind not in kinds or k not in B:
+                    continue
+                want = g_new.to_rhino(g_old.to_houdini(center(o.Geometry).reshape(1, 3)))[0]
+                err = float(np.abs(center(B[k].Geometry) - want).max())
+                if err > (1e-6 if kind in ("Brep", "Extrusion") else 0.05):
+                    bad.append("%s %s %.4g" % (kind, o.Attributes.Name, err))
+            if bad:
+                fails.append("xform %s: misplaced %s" % (case, bad[:4]))
+            m_ = re.search(r"\((\d+) checked by geometry signature\)", text)
+            if not m_ or int(m_.group(1)) != n_breps:
+                fails.append("xform %s: fast path %s of %d" % (case, m_.group(1) if m_ else None, n_breps))
+            moved = re.search(r"another global Xform than at import\): (\d+)", text)
+            if case != "same" and (not moved or int(moved.group(1)) != n_breps):
+                fails.append("xform %s: moved Breps %s of %d" % (case, moved.group(1) if moved else 0, n_breps))
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export xform override: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run_versions() + run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new() + run_export_scratch()
-          + run_export_passthrough() + run_export_changes() + run_export_rhino()
+          + run_export_passthrough() + run_export_xform_override() + run_export_changes() + run_export_rhino()
           + run_export_real())

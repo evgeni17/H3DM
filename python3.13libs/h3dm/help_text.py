@@ -291,6 +291,10 @@ writing. The report (and the read-back check) is on the *Report* tab.
   trim loops exactly as imported (`rhino_trim_loops`, with arcs) when the trims were not edited in Houdini,
   otherwise Houdini's current trim curves — then joined into one Brep (solids stay solids when the faces still
   meet; otherwise several Breps with a warning). Holes, curved faces, poles and seams are supported.
+  Limits: faces are joined at the file tolerance, then up to 20x it; faces that still do not meet are not moved
+  or patched — the object comes out as several Breps or open, named in the warning with pieces and naked edges.
+  Checked: validity, solid vs source, naked edges (not the distance to the Houdini surfaces). Objects invalid
+  in the source file become meshes. Unchanged objects and objects moved as a whole are never rebuilt.
 * Without Rhino (not running, an object it cannot rebuild, or *Convert to Mesh*): planar faces with one outer
   loop are written exactly as trimmed planes (arcs stay arcs), the rest as meshes (Houdini Convert respects the
   trims), with a warning.
@@ -369,7 +373,11 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
   Houdini, петли обрезки точно как при импорте (`rhino_trim_loops`, с дугами), если обрезку в Houdini не меняли,
   иначе текущие кривые обрезки Houdini — и объединяются в один Brep (тела остаются телами, если грани
   по-прежнему сходятся; иначе несколько Brep с предупреждением). Отверстия, криволинейные грани, полюса и швы
-  поддерживаются.
+  поддерживаются. Ограничения: грани объединяются с допуском файла, затем до 20-кратного; не сошедшиеся грани не
+  двигаются и не латаются — объект выходит несколькими Brep или незамкнутым, предупреждение называет его, число
+  частей и свободных рёбер. Проверяется корректность, замкнутость по сравнению с исходником, свободные рёбра (не
+  отклонение от поверхностей Houdini). Объекты, некорректные в исходном файле, — сетками. Неизменённые и
+  перенесённые целиком объекты не пересобираются никогда.
 * Без Rhino (не запущен, объект не собирается или *Convert to Mesh*): плоские грани с одной внешней петлёй
   пишутся точно обрезанными плоскостями (дуги остаются дугами), остальные — сетками (Convert Houdini учитывает
   обрезку), с предупреждением.

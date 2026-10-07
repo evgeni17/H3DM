@@ -7,6 +7,10 @@
 содержимого исходного .3dm. Экспорт считает тот же отпечаток по текущей геометрии массивами (без обхода
 вершин через HOM): если он совпал и исходный файл тот же, объект берётся из исходника без сравнения точек
 с исходными (это секунды на больших моделях). Иначе — полное сравнение (passthrough.object_match).
+
+Отпечаток считается в координатах Houdini, поэтому рядом (rhino_geo_sig_xform) хранится преобразование импорта
+Rhino -> Houdini: при другом глобальном трансформе экспорта неизменённый объект переносится в файл с поправкой
+(fast_xform), а не копируется на старое место.
 """
 import hashlib
 import os
@@ -16,6 +20,7 @@ import numpy as np
 import hou
 
 SIG_ATTR = "rhino_geo_sig"
+SIG_XFORM_ATTR = "rhino_geo_sig_xform"      # матрица импорта Rhino -> Houdini (12 чисел, строки 3x4)
 FILE_SIG_ATTR = "rhino_file_sig"
 _FILE_SIGS = {}
 
@@ -119,8 +124,48 @@ def object_signatures(geo, topo=None, exclude=()):
     return out
 
 
-def write_signatures(geo, exclude=()):
-    """Импорт: rhino_geo_sig на каждый примитив объекта."""
+def xform_text(m4):
+    """Матрица 4x4 (Rhino -> Houdini) -> строка для rhino_geo_sig_xform (double без потерь)."""
+    m = np.asarray(m4, dtype=np.float64).reshape(4, 4)
+    return " ".join(repr(float(x)) for x in m[:3].reshape(12))
+
+
+def xform_from_text(text):
+    """Строка rhino_geo_sig_xform -> 4x4 или None."""
+    try:
+        v = [float(x) for x in (text or "").split()]
+    except ValueError:
+        return None
+    if len(v) != 12:
+        return None
+    m = np.eye(4)
+    m[:3] = np.asarray(v).reshape(3, 4)
+    return m
+
+
+def affine_of(fn):
+    """Аффинная функция точек (N,3) -> (N,3) как матрица 4x4 (столбцовые векторы)."""
+    q = np.asarray(fn(np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]])), dtype=np.float64).reshape(4, 3)
+    m = np.eye(4)
+    m[:3, 3] = q[0]
+    m[:3, :3] = (q[1:] - q[0]).T
+    return m
+
+
+def fast_xform(import_m, to, scale, tol):
+    """Неизменённый в Houdini объект: преобразование исходника (в единицах файла экспорта, после * scale) в
+    файл экспорта. import_m — Rhino -> Houdini при импорте, to — Houdini -> файл экспорта.
+    -> None (тот же трансформ — объект на прежнем месте) или 4x4 (другой origin/оси/масштаб)."""
+    T = affine_of(to) @ import_m                     # исходник (единицы исходника) -> файл экспорта
+    M = T @ np.diag([1.0 / scale, 1.0 / scale, 1.0 / scale, 1.0])
+    if float(np.abs(M[:3, :3] - np.eye(3)).max()) <= 1e-9 and float(np.abs(M[:3, 3]).max()) <= tol:
+        return None
+    return M
+
+
+def write_signatures(geo, exclude=(), import_m=None):
+    """Импорт: rhino_geo_sig на каждый примитив объекта и rhino_geo_sig_xform — преобразование импорта
+    (без него экспорт не доверяет отпечатку и сравнивает объект с исходником полностью)."""
     sigs = object_signatures(geo, exclude=exclude)
     if not sigs:
         return 0
@@ -131,6 +176,11 @@ def write_signatures(geo, exclude=()):
     if geo.findPrimAttrib(SIG_ATTR) is None:
         geo.addAttrib(hou.attribType.Prim, SIG_ATTR, "")
     geo.setPrimStringAttribValues(SIG_ATTR, vals)
+    if import_m is not None:
+        xt = xform_text(import_m)
+        if geo.findPrimAttrib(SIG_XFORM_ATTR) is None:
+            geo.addAttrib(hou.attribType.Prim, SIG_XFORM_ATTR, "")
+        geo.setPrimStringAttribValues(SIG_XFORM_ATTR, [xt if v else "" for v in vals])
     return len(sigs)
 
 

@@ -328,16 +328,29 @@ def _mark_passthrough(geo, pt):
          if geo.findPointAttrib("Pw") is not None else np.ones(len(P)))
     off, vpt = _topology(geo)
     to, scale = pt["to"], pt["scale"]
-    # быстрый путь: отпечаток объекта как при импорте и исходный файл тот же -> объект не менялся
-    fast = set()
-    if pt.get("file_sig_ok") and geo.findPrimAttrib("rhino_geo_sig") is not None:
-        from .geosig import object_signatures
+    # быстрый путь: отпечаток объекта как при импорте и исходный файл тот же -> объект не менялся в Houdini.
+    # Отпечаток — в координатах Houdini: исходник пишется с поправкой на разницу трансформов импорта и экспорта
+    # (другой origin/оси/масштаб на входе Xform), иначе неизменённые Brep остались бы на старом месте.
+    fast = {}                                      # rid -> None (то же место) или 4x4
+    if (pt.get("file_sig_ok") and geo.findPrimAttrib("rhino_geo_sig") is not None
+            and geo.findPrimAttrib("rhino_geo_sig_xform") is not None):
+        from .geosig import object_signatures, xform_from_text, fast_xform
         now_sig = object_signatures(geo, (off, vpt), helper)
         stored = {}
-        for r_, s_ in zip(rid, geo.primStringAttribValues("rhino_geo_sig")):
-            if r_ and s_ and r_ not in stored:
-                stored[r_] = s_
-        fast = {r_ for r_, s_ in now_sig.items() if stored.get(r_) == s_}
+        for r_, s_, x_ in zip(rid, geo.primStringAttribValues("rhino_geo_sig"),
+                              geo.primStringAttribValues("rhino_geo_sig_xform")):
+            if r_ and s_ and x_ and r_ not in stored:
+                stored[r_] = (s_, x_)
+        moves = {}
+        for r_, s_ in now_sig.items():
+            st_ = stored.get(r_)
+            if st_ is None or st_[0] != s_:
+                continue
+            if st_[1] not in moves:
+                m_imp = xform_from_text(st_[1])        # None — строка испорчена: объект идёт полным сравнением
+                moves[st_[1]] = None if m_imp is None else (fast_xform(m_imp, to, scale, pt["abs_tol"]),)
+            if moves[st_[1]] is not None:
+                fast[r_] = moves[st_[1]][0]
     # 1) геометрия граней (позиции, веса, узлы, порядки) — без обрезки
     cand = []                  # (rid, исходная геометрия, {грань: номер NURBS-примитива}, примитивы объекта)
     for r_id, faces in by_obj.items():
@@ -356,7 +369,7 @@ def _mark_passthrough(geo, pt):
             if nprims and sig_attr is None:
                 pt["no_sig"] = pt.get("no_sig", 0) + 1
                 continue
-            cand.append((r_id, g, nprims, [i for idx in faces.values() for i in idx], None))
+            cand.append((r_id, g, nprims, [i for idx in faces.values() for i in idx], fast[r_id]))
             continue
         data, maxabs, ok, nprims = {}, 0.0, True, {}
         for fi, idx in faces.items():
@@ -404,7 +417,7 @@ def _mark_passthrough(geo, pt):
         if M is not None:
             pt.setdefault("xform", {})[r_id] = M
         sel.extend(prims[i] for i in members)
-    pt["fast"] = len(fast & set(pt["map"]))      # перенесены после проверки по отпечатку
+    pt["fast"] = len(set(fast) & set(pt["map"]))      # перенесены после проверки по отпечатку
     if sel:
         grp = geo.findPrimGroup("__h3dm_pass") or geo.createPrimGroup("__h3dm_pass")
         grp.add(sel)
@@ -920,7 +933,7 @@ class Plan(object):
         self.passthrough = 0     # объектов перенесено из файла импорта без изменений
         self.rebuilt = 0         # объектов с обрезанными гранями пересобрано в Rhino
         self.passthrough_fast = 0    # неизменность подтверждена отпечатком (без сравнения точек с исходником)
-        self.passthrough_moved = 0   # из них перенесены/повёрнуты в Houdini целиком (исходник с преобразованием)
+        self.passthrough_moved = 0   # из них с преобразованием: перенесены в Houdini целиком или другой Xform экспорта
 
 
 def collect(node):
@@ -1511,7 +1524,8 @@ def report_text(plan, path=None, writer=None, back=None):
         lines.append("Unchanged objects written from the source file (exact Breps): %d%s" % (
             plan.passthrough, "  (%d checked by geometry signature)" % plan.passthrough_fast if plan.passthrough_fast else ""))
         if plan.passthrough_moved:
-            lines.append("  of them moved/rotated/scaled as a whole in Houdini (source Brep + exact transform): %d"
+            lines.append("  of them placed with an exact transform (source Brep moved/rotated/scaled as a whole in "
+                         "Houdini, or another global Xform than at import): %d"
                          % plan.passthrough_moved)
     if plan.rebuilt:
         lines.append("Changed Brep objects joined and rebuilt in Rhino (exact Breps): %d" % plan.rebuilt)
