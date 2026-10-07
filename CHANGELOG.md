@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0-dev.1 — 2026-10-07
+* Development moves to assets `::5.0` (Tab creates `h3dm::3dm_import::5.0` / `h3dm::3dm_export::5.0`). Nodes
+  `::4.0` in existing scenes keep cooking the frozen 0.4.0 code, `::1.0` the 0.4.0-dev.6 code.
+* Plan for 0.5: clean install from scratch, work without Rhino and with a busy Rhino (timeouts), opening real
+  working scenes with `::1.0` / `::4.0` nodes, `INSTALL.json` written by `deploy.py`, documentation.
+
 ## 0.4.0 — 2026-10-07
 Release 0.4: export to Rhino. Assets `::4.0` are frozen with this code (`python3.13libs/h3dm_4_0`).
 Checked on the user's real model (114 Breps, 3873 faces, 113 solids): Rhino -> Houdini -> Rhino in Mesh + Curves and

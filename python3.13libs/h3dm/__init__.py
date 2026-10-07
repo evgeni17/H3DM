@@ -9,14 +9,14 @@ import os
 import platform
 import sys
 
-__version__ = "0.4.0"
+__version__ = "0.5.0.dev1"
 
 # Версия ассетов (часть имени типа ноды h3dm::3dm_import::<версия>). Правило (docs: README, раздел Versions):
 #   релиз 0.N  -> ассеты ::N.0 (0.4 -> 4.0); исправление релиза, меняющее поведение, -> ::N.1 и т.д.;
 #   после 1.0: релиз M.N -> ::(10*M+N).0.
 # Выпущенная версия замораживается (freeze.py): копия этого пакета h3dm_<версия> и свои файлы HDA — ноды
 # в рабочих сценах считаются тем же кодом всегда; разработка идёт в h3dm со следующей версией ассетов.
-HDA_VERSION = "4.0"
+HDA_VERSION = "5.0"
 FROZEN = False            # True в замороженной копии
 IMPORT_TYPE = "h3dm::3dm_import::" + HDA_VERSION
 EXPORT_TYPE = "h3dm::3dm_export::" + HDA_VERSION

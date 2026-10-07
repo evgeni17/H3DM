@@ -19,6 +19,15 @@
       "houdini": "22.0.429",
       "python": "3.13",
       "rhino": "8 (Prepare in Rhino, rebuild of trimmed faces)"
+    },
+    "5.0": {
+      "status": "development",
+      "plugin": "0.5.0",
+      "package": "h3dm",
+      "rhino3dm": "8.35.0",
+      "houdini": "22.0.429",
+      "python": "3.13",
+      "rhino": "8 (Prepare in Rhino, rebuild of trimmed faces)"
     }
   }
 }

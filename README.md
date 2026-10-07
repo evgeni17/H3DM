@@ -73,7 +73,7 @@ import). What to expect from it:
 
 ## Asset versions
 
-The node types carry a version: `h3dm::3dm_import::4.0`, `h3dm::3dm_export::4.0`. Houdini keeps every installed
+The node types carry a version: `h3dm::3dm_import::5.0`, `h3dm::3dm_export::5.0` (in development; 0.4 is `::4.0`). Houdini keeps every installed
 version side by side; the Tab menu creates the newest one, and nodes already in a scene stay on their version
 ([SideFX: asset versioning](https://www.sidefx.com/docs/houdini/assets/versioning_systems.html)).
 
@@ -83,6 +83,7 @@ version side by side; the Tab menu creates the newest one, and nodes already in 
   (`python3.13libs/h3dm_4_0/`, with its own Rhino scripts) and its HDA files (`otls/h3dm_3dm_import_4.0.hda`)
   call only that copy, so scenes made with it cook the same with any later H3DM. `FROZEN.sha256` and
   `tests/test_frozen.py` guard this.
+* `::4.0` — H3DM 0.4.0 (export), frozen with the 0.4.0 code.
 * `::1.0` — all nodes made before versioning (H3DM 0.3.x – 0.4.0-dev.6), frozen with the 0.4.0-dev.6 code.
 * To move a node to a newer version: create the new node and copy the parameters; Houdini does not upgrade it
   silently. The frozen versions share `vendor/rhino3dm`; the versions each one was tested with are in
