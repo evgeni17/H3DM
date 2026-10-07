@@ -18,8 +18,10 @@ python deploy.py                 # copies changed files to ~/tools_houdini/H3DM 
 python deploy.py --clean         # also removes files that no longer exist in the checkout
 ```
 
-`packages/H3DM.json` points `H3DM` to the installed copy. After changing the node interface, rebuild the HDAs
-into the checkout (`h3dm.hda_build.build_all(otls="<checkout>/otls")`) and deploy again.
+`packages/H3DM.json` points `H3DM` to the installed copy. Houdini loads the code from there, and `build_all` builds
+the HDAs (interface, help) from that loaded code. After changing the node interface or help: deploy, reload the
+`h3dm` modules in Houdini, rebuild the HDAs into the checkout (`h3dm.hda_build.build_all(otls="<checkout>/otls")`),
+deploy again. Building before deploying silently gives HDAs with the old interface and help.
 
 The banner `docs/h3dm_banner.png` stays in both READMEs right after the title — keep it when editing them
 (`tests/test_repo.py` checks it).
@@ -31,8 +33,10 @@ Development happens in `python3.13libs/h3dm/` with the asset version `HDA_VERSIO
 
 ```bash
 python freeze.py 4.0             # h3dm -> h3dm_4_0 (module references rewritten, own Rhino scripts)
-# in Houdini, once:  import h3dm_4_0.hda_build as b; b.build_all(force=True)
+python deploy.py                 # the frozen copy must be in the installed folder before building
+# in Houdini, once:  import h3dm_4_0.hda_build as b; b.build_all(force=True, otls="<checkout>/otls")
 #                    -> otls/h3dm_3dm_import_4.0.hda, otls/h3dm_3dm_export_4.0.hda
+python deploy.py                 # the new HDAs into the installed folder
 python freeze.py --seal 4.0      # checksums -> h3dm_4_0/FROZEN.sha256
 # then raise HDA_VERSION in h3dm/__init__.py (5.0, or 4.1 for a behaviour-changing fix) and rebuild its HDAs
 python tests/test_frozen.py      # frozen versions unchanged, current version above all of them
