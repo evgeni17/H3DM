@@ -21,6 +21,9 @@ python deploy.py --clean         # also removes files that no longer exist in th
 `packages/H3DM.json` points `H3DM` to the installed copy. After changing the node interface, rebuild the HDAs
 into the checkout (`h3dm.hda_build.build_all(otls="<checkout>/otls")`) and deploy again.
 
+The banner `docs/h3dm_banner.png` stays in both READMEs right after the title — keep it when editing them
+(`tests/test_repo.py` checks it).
+
 ## Asset versions and releases
 
 Development happens in `python3.13libs/h3dm/` with the asset version `HDA_VERSION` from `h3dm/__init__.py`

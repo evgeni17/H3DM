@@ -16,6 +16,7 @@ python tests/test_names.py      # transliteration and name rules (plain Python)
 python tests/test_xform.py      # global transform, float32 precision far from the origin (numpy)
 python tests/test_read.py       # reading the fixtures (rhino3dm + numpy)
 python tests/test_houjson.py    # binary JSON (.bgeo) writer for NURBS and trims (numpy)
+python tests/test_repo.py       # repository layout: README banner (plain Python)
 ```
 
 In Houdini (Python Shell or `hython`):
