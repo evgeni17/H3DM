@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.0-dev.7 — 2026-10-07
+Asset versions follow the release; nodes in working scenes never change.
+* Node types are versioned by release: release 0.N -> `h3dm::3dm_import::N.0` (0.4 -> `::4.0`); Houdini keeps all
+  versions installed, the Tab menu creates the newest one, existing nodes stay on theirs.
+* **`::1.0` is frozen** with the 0.4.0-dev.6 code (everything made before versioning): its HDAs
+  (`otls/h3dm_3dm_import_1.0.hda`, `..._export_1.0.hda`) call only the frozen copy `python3.13libs/h3dm_1_0/` with
+  its own Rhino scripts, so working scenes cook exactly as before whatever changes in development.
+* `freeze.py` (freeze / `--seal` / `--verify`) makes and guards frozen versions; `tests/test_frozen.py` checks the
+  checksums and that the development version is above all frozen ones; Houdini regression `run_versions`.
+* Development continues as `::4.0`; the old unversioned HDA files `h3dm_3dm_import.hda` / `h3dm_3dm_export.hda`
+  are replaced by the versioned files.
+
 ## 0.4.0-dev.6 — 2026-10-05
 Fixes from the real-model round trip (test.3dm of AA_LIK_KonZal: 114 Breps, 3873 faces, 113 solids).
 * **Knot vectors Houdini rejects:** Houdini 22 drops a knot vector with a span below ~1e-5 (absolute) and puts

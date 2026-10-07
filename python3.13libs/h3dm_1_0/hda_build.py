@@ -3,7 +3,7 @@
 """Сборка HDA плагина (h3dm::3dm_import, h3dm::3dm_export) в $H3DM/otls.
 
 Запуск: меню H3DM > Rebuild HDAs, либо в Python Shell:
-    import h3dm.hda_build as b; b.build_all()
+    import h3dm_1_0.hda_build as b; b.build_all()
 HDA тонкие: вся логика в модуле h3dm, пересборка нужна только при изменении интерфейса.
 """
 import os
@@ -16,16 +16,16 @@ OTLS = os.path.join(ROOT, "otls")
 
 from . import HDA_VERSION, IMPORT_TYPE, EXPORT_TYPE, FROZEN  # noqa: E402
 
-GEO_CODE = """# H3DM: чтение .3dm — геометрия (логика в модуле h3dm.sop_import)
-import h3dm.sop_import as m
+GEO_CODE = """# H3DM: чтение .3dm — геометрия (логика в модуле h3dm_1_0.sop_import)
+import h3dm_1_0.sop_import as m
 m.cook(hou.pwd(), output=0)
 """
 INFO_CODE = """# H3DM: чтение .3dm — тексты, точки, размеры, свет (выход Info)
-import h3dm.sop_import as m
+import h3dm_1_0.sop_import as m
 m.cook(hou.pwd(), output=1)
 """
 XFORM_CODE = """# H3DM: глобальный трансформ (выход Xform) — точка с d@h3dm_xform (double)
-import h3dm.sop_import as m
+import h3dm_1_0.sop_import as m
 m.cook(hou.pwd(), output=2)
 """
 
@@ -53,12 +53,12 @@ def _import_ptg():
     g = hou.ParmTemplateGroup()
     g.append(hou.StringParmTemplate("file", "3dm File", 1, string_type=hou.stringParmType.FileReference,
                                     file_type=hou.fileType.Any, tags={"filechooser_pattern": "*.3dm"}))
-    g.append(hou.ButtonParmTemplate("reload", "Reload", script_callback="import h3dm.sop_import as m; m.clear_cache(kwargs)",
+    g.append(hou.ButtonParmTemplate("reload", "Reload", script_callback="import h3dm_1_0.sop_import as m; m.clear_cache(kwargs)",
                                     script_callback_language=PY, join_with_next=True))
-    g.append(hou.ButtonParmTemplate("info", "File Info", script_callback="import h3dm.sop_import as m; m.info_text(kwargs)",
+    g.append(hou.ButtonParmTemplate("info", "File Info", script_callback="import h3dm_1_0.sop_import as m; m.info_text(kwargs)",
                                     script_callback_language=PY, join_with_next=True))
     g.append(hou.ButtonParmTemplate("prepare", "Prepare in Rhino",
-                                    script_callback="import h3dm.prepare_ui as m; m.prepare_node(kwargs)",
+                                    script_callback="import h3dm_1_0.prepare_ui as m; m.prepare_node(kwargs)",
                                     script_callback_language=PY,
                                     help="Send the file to a running Rhino 8: it creates render meshes, exact trim "
                                          "data and NURBS from SubD and saves <name>_h3dm_v###.3dm next to the source. "
@@ -163,7 +163,7 @@ def _import_ptg():
                               conditionals={DISABLE: "{ diskcache == 0 }"},
                               help="Fast cooks are not stored."),
         hou.ButtonParmTemplate("cacheclear", "Clear Disk Cache",
-                               script_callback="import h3dm.sop_import as m; m.clear_disk_cache(kwargs)",
+                               script_callback="import h3dm_1_0.sop_import as m; m.clear_disk_cache(kwargs)",
                                script_callback_language=PY),
     ]
 
@@ -249,11 +249,11 @@ def _export_ptg():
     g.append(hou.StringParmTemplate("file", "Output 3dm", 1, default_value=("$HIP/rhino/$HIPNAME.3dm",),
                                     string_type=hou.stringParmType.FileReference, file_type=hou.fileType.Any,
                                     tags={"filechooser_pattern": "*.3dm", "filechooser_mode": "write"}))
-    g.append(hou.ButtonParmTemplate("export", "Export 3dm", script_callback="import h3dm.sop_export as m; m.export_node(kwargs)",
+    g.append(hou.ButtonParmTemplate("export", "Export 3dm", script_callback="import h3dm_1_0.sop_export as m; m.export_node(kwargs)",
                                     script_callback_language=PY, join_with_next=True))
-    g.append(hou.ButtonParmTemplate("check", "Check Attributes", script_callback="import h3dm.sop_export as m; m.check_node(kwargs)",
+    g.append(hou.ButtonParmTemplate("check", "Check Attributes", script_callback="import h3dm_1_0.sop_export as m; m.check_node(kwargs)",
                                     script_callback_language=PY, join_with_next=True))
-    g.append(hou.ButtonParmTemplate("reveal", "Reveal File", script_callback="import h3dm.sop_export as m; m.reveal_file(kwargs)",
+    g.append(hou.ButtonParmTemplate("reveal", "Reveal File", script_callback="import h3dm_1_0.sop_export as m; m.reveal_file(kwargs)",
                                     script_callback_language=PY))
     g.append(_menu("version", "Rhino Version", [("8", "Rhino 8"), ("7", "Rhino 7"), ("6", "Rhino 6")]))
     g.append(_toggle("overwrite", "Overwrite Existing File", False, join_with_next=True,
@@ -526,7 +526,7 @@ def build_all(kwargs=None, otls=None, install=True, force=False):
     """otls — папка назначения (по умолчанию $H3DM/otls); install=False — не подгружать в сессию.
     Замороженную версию (FROZEN) пересобирать нельзя: её HDA собираются один раз при заморозке (force=True)."""
     if FROZEN and not force:
-        raise RuntimeError("H3DM %s assets are frozen; rebuild the current version (h3dm.hda_build)." % HDA_VERSION)
+        raise RuntimeError("H3DM %s assets are frozen; rebuild the current version (h3dm_1_0.hda_build)." % HDA_VERSION)
     otls = otls or OTLS
     if not os.path.isdir(otls):
         os.makedirs(otls)

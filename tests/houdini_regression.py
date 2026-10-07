@@ -1391,7 +1391,57 @@ def run_export_real():
     return fails
 
 
-result = (run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
+def run_versions():
+    """Версии ассетов: Tab создаёт текущую; замороженные установлены рядом и считаются своим кодом."""
+    import re as _re
+    import h3dm
+    fails = []
+    cat = hou.sopNodeTypeCategory()
+    names = [n for n in cat.nodeTypes() if n.startswith("h3dm::3dm_import::")]
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_versions")
+    try:
+        n = tmp.createNode("h3dm::3dm_import")
+        if n.type().name() != h3dm.IMPORT_TYPE:
+            fails.append("default import type %s, expected %s" % (n.type().name(), h3dm.IMPORT_TYPE))
+        src = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+        ref = None
+        for tn in sorted(names):
+            ver = tn.split("::")[-1]
+            pkg = "h3dm" if ver == h3dm.HDA_VERSION else "h3dm_" + ver.replace(".", "_")
+            node = tmp.createNode(tn)
+            code = node.node("GEO").parm("python").eval()
+            if ("import %s.sop_import" % pkg) not in code:
+                fails.append("%s cooks %s, expected %s" % (tn, _re.findall(r"import (\S+)", code)[:1], pkg))
+            cb = node.parm("reload").parmTemplate().scriptCallback()
+            if ("import %s." % pkg) not in cb:
+                fails.append("%s callbacks use %s" % (tn, cb))
+            lib = cat.nodeType(tn).definition().libraryFilePath()
+            if not lib.endswith("h3dm_3dm_import_%s.hda" % ver):
+                fails.append("%s from %s" % (tn, lib))
+            node.parm("file").set(src)
+            node.parm("diskcache").set(0)
+            if node.errors():
+                fails.append("%s: %s" % (tn, node.errors()))
+            elif ver != h3dm.HDA_VERSION:
+                import importlib
+                frozen = importlib.import_module(pkg)
+                if not frozen.FROZEN or frozen.HDA_VERSION != ver:
+                    fails.append("%s: package %s is not frozen %s" % (tn, pkg, ver))
+        for tn in [x for x in cat.nodeTypes() if x.startswith("h3dm::3dm_export::")]:
+            ver = tn.split("::")[-1]
+            pkg = "h3dm" if ver == h3dm.HDA_VERSION else "h3dm_" + ver.replace(".", "_")
+            e = tmp.createNode(tn)
+            if ("import %s.sop_export" % pkg) not in e.parm("export").parmTemplate().scriptCallback():
+                fails.append("%s export button: %s" % (tn, e.parm("export").parmTemplate().scriptCallback()))
+        if "h3dm::3dm_import::1.0" not in names:
+            fails.append("frozen h3dm::3dm_import::1.0 is not installed")
+    finally:
+        tmp.destroy()
+    print("houdini_regression versions: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
+result = (run_versions() + run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
           + run_export_passthrough() + run_export_changes() + run_export_rhino()
           + run_export_real())

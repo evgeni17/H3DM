@@ -20,3 +20,20 @@ python deploy.py --clean         # also removes files that no longer exist in th
 
 `packages/H3DM.json` points `H3DM` to the installed copy. After changing the node interface, rebuild the HDAs
 into the checkout (`h3dm.hda_build.build_all(otls="<checkout>/otls")`) and deploy again.
+
+## Asset versions and releases
+
+Development happens in `python3.13libs/h3dm/` with the asset version `HDA_VERSION` from `h3dm/__init__.py`
+(see README, *Asset versions*). Released versions are frozen and never edited:
+
+```bash
+python freeze.py 4.0             # h3dm -> h3dm_4_0 (module references rewritten, own Rhino scripts)
+# in Houdini, once:  import h3dm_4_0.hda_build as b; b.build_all(force=True)
+#                    -> otls/h3dm_3dm_import_4.0.hda, otls/h3dm_3dm_export_4.0.hda
+python freeze.py --seal 4.0      # checksums -> h3dm_4_0/FROZEN.sha256
+# then raise HDA_VERSION in h3dm/__init__.py (5.0, or 4.1 for a behaviour-changing fix) and rebuild its HDAs
+python tests/test_frozen.py      # frozen versions unchanged, current version above all of them
+```
+
+A fix that must reach scenes already made with a released version is a new asset version, never an edit of the
+frozen copy.

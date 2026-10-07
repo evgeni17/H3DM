@@ -4,7 +4,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
 *Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for trimmed NURBS surfaces.
 
-> **Status: 0.4.0-dev.6 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
+> **Status: 0.4.0-dev.7 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 
@@ -45,6 +45,22 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
   the import has an *Xform* output, the export an *Xform* input that writes back to the original coordinates.
 * **Non-Latin names:** Cyrillic layer, object, group and material names can be transliterated; the originals are
   kept and restored on export.
+
+## Asset versions
+
+The node types carry a version: `h3dm::3dm_import::4.0`, `h3dm::3dm_export::4.0`. Houdini keeps every installed
+version side by side; the Tab menu creates the newest one, and nodes already in a scene stay on their version
+([SideFX: asset versioning](https://www.sidefx.com/docs/houdini/assets/versioning_systems.html)).
+
+* **Numbering:** release `0.N` -> assets `::N.0` (0.4 -> `::4.0`); a fix of a released version that changes its
+  behaviour -> `::N.1`; after 1.0, release `M.N` -> `::(10*M+N).0`. Release 0.4 starts with `::4.0`.
+* **Frozen versions:** a released asset version never changes. Its Python code is a frozen copy
+  (`python3.13libs/h3dm_4_0/`, with its own Rhino scripts) and its HDA files (`otls/h3dm_3dm_import_4.0.hda`)
+  call only that copy, so scenes made with it cook the same with any later H3DM. `FROZEN.sha256` and
+  `tests/test_frozen.py` guard this.
+* `::1.0` — all nodes made before versioning (H3DM 0.3.x – 0.4.0-dev.6), frozen with the 0.4.0-dev.6 code.
+* To move a node to a newer version: create the new node and copy the parameters; Houdini does not upgrade it
+  silently. The frozen versions share `vendor/rhino3dm`.
 
 ## Requirements
 
