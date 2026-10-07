@@ -6,7 +6,7 @@ H3DM adds Rhino `.3dm` import and export to SideFX Houdini as two SOP nodes. It 
 [rhino3dm](https://github.com/mcneel/rhino3dm) (openNURBS, MIT) and does not need Rhino to read files; an optional
 *Prepare in Rhino* step uses a running Rhino 8 for files saved without render meshes and for trimmed NURBS surfaces.
 
-> **Status: 0.4.0-dev.10 — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Release 0.4 after the full round-trip check.** Geometry modes (meshes, NURBS, trimmed NURBS),
+> **Status: 0.4.0 released — import works; export writes meshes, curves, NURBS surfaces, blocks, points and all attributes back to the original coordinates; unchanged Breps go back exactly from the source file, changed trimmed Breps are rebuilt exactly in a running Rhino 8 (meshes without Rhino). Next: 0.5 — clean-install and no-Rhino tests, documentation, first public release.** Geometry modes (meshes, NURBS, trimmed NURBS),
 > attributes, Cyrillic names, the *Info* output, the global transform for far-away models, Prepare in Rhino and a
 > disk cache are done.
 
@@ -138,7 +138,7 @@ tests/                  fixtures made in Rhino 8, unit and Houdini tests
 | 0.1 ✓ | package, menu, shelf, installer, HDAs, document data and tables, File Info |
 | 0.2 ✓ | import: NURBS, meshes, curves, points, blocks, attributes, Cyrillic names, *Info* output, global transform |
 | 0.3 ✓ | geometry modes, trimmed NURBS, Prepare in Rhino, type groups, strict Xform input, disk cache, speed |
-| 0.4 | export of everything above |
+| 0.4 ✓ | export of everything above (assets `::4.0`) |
 | 0.5 | tests, documentation, first public release |
 
 ## License

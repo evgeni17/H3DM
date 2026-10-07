@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: 2026 EOK
 # SPDX-License-Identifier: Apache-2.0
-"""H3DM — импорт/экспорт файлов Rhino .3dm для Houdini на базе rhino3dm (openNURBS).
+"""H3DM (ЗАМОРОЖЕННАЯ версия ассетов 4.0 — не изменять) — импорт/экспорт файлов Rhino .3dm для Houdini на базе rhino3dm (openNURBS).
 
 Пакет подключается через packages/H3DM.json (переменная $H3DM указывает на корень плагина).
 Зависимость rhino3dm лежит внутри плагина: $H3DM/vendor/<py-версия>-<платформа>/.
@@ -17,7 +17,7 @@ __version__ = "0.4.0"
 # Выпущенная версия замораживается (freeze.py): копия этого пакета h3dm_<версия> и свои файлы HDA — ноды
 # в рабочих сценах считаются тем же кодом всегда; разработка идёт в h3dm со следующей версией ассетов.
 HDA_VERSION = "4.0"
-FROZEN = False            # True в замороженной копии
+FROZEN = True            # True в замороженной копии
 IMPORT_TYPE = "h3dm::3dm_import::" + HDA_VERSION
 EXPORT_TYPE = "h3dm::3dm_export::" + HDA_VERSION
 

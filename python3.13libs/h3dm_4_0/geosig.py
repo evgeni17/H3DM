@@ -1,0 +1,222 @@
+# SPDX-FileCopyrightText: 2026 EOK
+# SPDX-License-Identifier: Apache-2.0
+"""Отпечатки геометрии объектов Rhino в Houdini: быстрый ответ «объект не менялся с импорта».
+
+Импорт записывает в каждый примитив объекта rhino_geo_sig — отпечаток всех его примитивов (число вершин,
+номер грани, позиции и веса в float32, у NURBS — порядки и узлы), а в detail rhino_file_sig — отпечаток
+содержимого исходного .3dm. Экспорт считает тот же отпечаток по текущей геометрии массивами (без обхода
+вершин через HOM): если он совпал и исходный файл тот же, объект берётся из исходника без сравнения точек
+с исходными (это секунды на больших моделях). Иначе — полное сравнение (passthrough.object_match).
+
+Отпечаток считается в координатах Houdini, поэтому рядом (rhino_geo_sig_xform) хранится преобразование импорта
+Rhino -> Houdini: при другом глобальном трансформе экспорта неизменённый объект переносится в файл с поправкой
+(fast_xform), а не копируется на старое место.
+"""
+import hashlib
+import os
+
+import numpy as np
+
+import hou
+
+SIG_ATTR = "rhino_geo_sig"
+SIG_XFORM_ATTR = "rhino_geo_sig_xform"
+# версия состава отпечатка: другая версия при импорте — отпечаток не совпадёт, экспорт сравнит объект полностью.
+# 2: + замкнутость многоугольников и типы, кроме Polygon / NURBS (0.4.0-dev.10)
+SIG_VERSION = b"H3DM-geo-2"      # матрица импорта Rhino -> Houdini (12 чисел, строки 3x4)
+FILE_SIG_ATTR = "rhino_file_sig"
+_FILE_SIGS = {}
+_OTHER_TYPES = tuple(t for t in (getattr(hou.primType, n, None) for n in (
+    "BezierCurve", "BezierSurface", "Circle", "Sphere", "Tube", "Metaball", "MetaSQuad", "PolySoup", "Volume",
+    "VDB", "TriangleBezier", "TriangleFan", "TriangleStrip", "Mesh", "PackedPrim", "PackedFragment",
+    "PackedGeometry", "AlembicRef", "ParticleSystem", "Agent", "Custom")) if t is not None)
+
+
+def _verb(name, parms):
+    v = hou.sopNodeTypeCategory().nodeVerb(name)
+    v.setParms(parms)
+    return v
+
+
+def topology(geo):
+    """Точки вершин всех примитивов разом (HOM по одной вершине — секунды на больших моделях):
+    -> (начало вершин примитива (n+1), номера точек вершин). Вершины примитива — в порядке prim.vertices()
+    (у NURBS-поверхности строками по V: индекс v * nu + u, как prim.vertex(u, v))."""
+    n = geo.intrinsicValue("primitivecount")
+    if not n:
+        return np.zeros(1, dtype=np.int64), np.zeros(0, dtype=np.int64)
+    # номер точки -> атрибут точки -> перенос на вершины; число вершин примитива — сумма единиц по вершинам
+    tmp = hou.Geometry()
+    tmp.merge(geo)
+    npt, nvx = tmp.intrinsicValue("pointcount"), tmp.intrinsicValue("vertexcount")
+    tmp.addAttrib(hou.attribType.Point, "__h3dm_pt", 0)
+    tmp.setPointIntAttribValuesFromString("__h3dm_pt", np.arange(npt, dtype=np.int32).tobytes())
+    tmp.addAttrib(hou.attribType.Vertex, "__h3dm_one", 0)
+    tmp.setVertexIntAttribValuesFromString("__h3dm_one", np.ones(nvx, dtype=np.int32).tobytes())
+    t1 = hou.Geometry()
+    _verb("attribpromote", {"inname": "__h3dm_pt", "inclass": 2, "outclass": 3, "method": 8}).execute(t1, [tmp])
+    t2 = hou.Geometry()
+    _verb("attribpromote", {"inname": "__h3dm_one", "inclass": 3, "outclass": 1, "method": 5,
+                            "useoutname": 1, "outname": "__h3dm_nv", "deletein": 0}).execute(t2, [t1])
+    vpt = np.frombuffer(t2.vertexIntAttribValuesAsString("__h3dm_pt"), dtype=np.int32).astype(np.int64)
+    cnt = np.frombuffer(t2.primIntAttribValuesAsString("__h3dm_nv"), dtype=np.int32).astype(np.int64)
+    off = np.zeros(n + 1, dtype=np.int64)
+    np.cumsum(cnt, out=off[1:])
+    if off[-1] != len(vpt):
+        raise RuntimeError("H3DM: vertex table mismatch (%d vs %d)" % (off[-1], len(vpt)))
+    return off, vpt
+
+
+def _str_values(geo, name, n):
+    return np.array(geo.primStringAttribValues(name), dtype=object) if geo.findPrimAttrib(name) is not None \
+        else np.full(n, "", dtype=object)
+
+
+def object_signatures(geo, topo=None, exclude=()):
+    """{rhino_id: отпечаток} для объектов Rhino в geo (примитивы с rhino_id, не части вставок блоков).
+    exclude — номера примитивов, которые не входят в объект (вспомогательные кривые границ)."""
+    n = geo.intrinsicValue("primitivecount")
+    if not n or geo.findPrimAttrib("rhino_id") is None:
+        return {}
+    off, vpt = topo if topo is not None else topology(geo)
+    rid = _str_values(geo, "rhino_id", n)
+    inst = _str_values(geo, "rhino_instance_id", n)
+    rf = (np.frombuffer(geo.primIntAttribValuesAsString("rhino_face"), dtype=np.int32)
+          if geo.findPrimAttrib("rhino_face") is not None else np.full(n, -1, dtype=np.int32))
+    keep = (rid != "") & (inst == "")
+    if len(exclude):
+        keep[np.asarray(list(exclude), dtype=np.int64)] = False
+    idx = np.nonzero(keep)[0]
+    if not len(idx):
+        return {}
+    P = np.frombuffer(geo.pointFloatAttribValuesAsString("P"), dtype=np.float32).reshape(-1, 3)
+    W = (np.frombuffer(geo.pointFloatAttribValuesAsString("Pw"), dtype=np.float32)
+         if geo.findPointAttrib("Pw") is not None else None)
+    basis = {}
+    for p in geo.iterPrimsOfType(hou.primType.NURBSSurface):
+        i = p.number()
+        if keep[i]:
+            basis[i] = (np.int32([p.intrinsicValue("uorder"), p.intrinsicValue("vorder"),
+                                  bool(p.intrinsicValue("uwrap")), bool(p.intrinsicValue("vwrap"))]).tobytes()
+                        + np.asarray(p.intrinsicValue("uknots"), dtype=np.float32).tobytes()
+                        + np.asarray(p.intrinsicValue("vknots"), dtype=np.float32).tobytes())
+    for p in geo.iterPrimsOfType(hou.primType.NURBSCurve):
+        i = p.number()
+        if keep[i]:
+            basis[i] = (np.int32([p.intrinsicValue("order"), bool(p.intrinsicValue("closed"))]).tobytes()
+                        + np.asarray(p.intrinsicValue("knots"), dtype=np.float32).tobytes())
+    # тип и замкнутость остальных примитивов: незамкнутый многоугольник (сетка, разомкнутая в Houdini, — уже
+    # полилинии), другие типы (Bezier, сфера, polysoup ...) — те же вершины, но другой объект Rhino.
+    # Массово: открытых примитивов и примитивов других типов обычно мало, многоугольники не перебираются.
+    for p in geo.globPrims("@intrinsic:closed==0"):
+        i = p.number()
+        if keep[i] and p.type() == hou.primType.Polygon:
+            basis[i] = b"open-poly"
+    for t in _OTHER_TYPES:
+        if geo.countPrimType(t):
+            for p in geo.iterPrimsOfType(t):
+                i = p.number()
+                if keep[i]:
+                    basis[i] = basis.get(i, b"") + str(t).encode()
+    rk = rid[idx]
+    uniq, inv = np.unique(rk.astype(str), return_inverse=True)
+    order = np.argsort(inv, kind="stable")
+    bounds = np.searchsorted(inv[order], np.arange(len(uniq) + 1))
+    cnt = (off[1:] - off[:-1])
+    out = {}
+    for k, r in enumerate(uniq):
+        prims = idx[order[bounds[k]:bounds[k + 1]]]
+        if prims[-1] - prims[0] + 1 == len(prims):
+            vids = vpt[off[prims[0]]:off[prims[-1] + 1]]
+        else:
+            vids = np.concatenate([vpt[off[i]:off[i + 1]] for i in prims])
+        h = hashlib.sha1(SIG_VERSION)
+        h.update(cnt[prims].astype(np.int32).tobytes())
+        h.update(rf[prims].astype(np.int32).tobytes())
+        h.update(P[vids].tobytes())
+        if W is not None:
+            h.update(W[vids].tobytes())
+        for i in prims:
+            b = basis.get(int(i))
+            if b is not None:
+                h.update(b)
+        out[str(r)] = h.hexdigest()[:24]
+    return out
+
+
+def xform_text(m4):
+    """Матрица 4x4 (Rhino -> Houdini) -> строка для rhino_geo_sig_xform (double без потерь)."""
+    m = np.asarray(m4, dtype=np.float64).reshape(4, 4)
+    return " ".join(repr(float(x)) for x in m[:3].reshape(12))
+
+
+def xform_from_text(text):
+    """Строка rhino_geo_sig_xform -> 4x4 или None."""
+    try:
+        v = [float(x) for x in (text or "").split()]
+    except ValueError:
+        return None
+    if len(v) != 12:
+        return None
+    m = np.eye(4)
+    m[:3] = np.asarray(v).reshape(3, 4)
+    return m
+
+
+def affine_of(fn):
+    """Аффинная функция точек (N,3) -> (N,3) как матрица 4x4 (столбцовые векторы)."""
+    q = np.asarray(fn(np.array([[0.0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]])), dtype=np.float64).reshape(4, 3)
+    m = np.eye(4)
+    m[:3, 3] = q[0]
+    m[:3, :3] = (q[1:] - q[0]).T
+    return m
+
+
+def fast_xform(import_m, to, scale, tol):
+    """Неизменённый в Houdini объект: преобразование исходника (в единицах файла экспорта, после * scale) в
+    файл экспорта. import_m — Rhino -> Houdini при импорте, to — Houdini -> файл экспорта.
+    -> None (тот же трансформ — объект на прежнем месте) или 4x4 (другой origin/оси/масштаб)."""
+    T = affine_of(to) @ import_m                     # исходник (единицы исходника) -> файл экспорта
+    M = T @ np.diag([1.0 / scale, 1.0 / scale, 1.0 / scale, 1.0])
+    if float(np.abs(M[:3, :3] - np.eye(3)).max()) <= 1e-9 and float(np.abs(M[:3, 3]).max()) <= tol:
+        return None
+    return M
+
+
+def write_signatures(geo, exclude=(), import_m=None):
+    """Импорт: rhino_geo_sig на каждый примитив объекта и rhino_geo_sig_xform — преобразование импорта
+    (без него экспорт не доверяет отпечатку и сравнивает объект с исходником полностью)."""
+    sigs = object_signatures(geo, exclude=exclude)
+    if not sigs:
+        return 0
+    n = geo.intrinsicValue("primitivecount")
+    rid = geo.primStringAttribValues("rhino_id")
+    inst = geo.primStringAttribValues("rhino_instance_id") if geo.findPrimAttrib("rhino_instance_id") else [""] * n
+    vals = [sigs.get(r, "") if r and not inst[i] else "" for i, r in enumerate(rid)]
+    if geo.findPrimAttrib(SIG_ATTR) is None:
+        geo.addAttrib(hou.attribType.Prim, SIG_ATTR, "")
+    geo.setPrimStringAttribValues(SIG_ATTR, vals)
+    if import_m is not None:
+        xt = xform_text(import_m)
+        if geo.findPrimAttrib(SIG_XFORM_ATTR) is None:
+            geo.addAttrib(hou.attribType.Prim, SIG_XFORM_ATTR, "")
+        geo.setPrimStringAttribValues(SIG_XFORM_ATTR, [xt if v else "" for v in vals])
+    return len(sigs)
+
+
+def file_signature(path):
+    """Отпечаток содержимого файла (sha1; кэш по пути, размеру и времени изменения)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return ""
+    key = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    sig = _FILE_SIGS.get(key)
+    if sig is None:
+        h = hashlib.sha1()
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 22), b""):
+                h.update(chunk)
+        sig = "%d:%s" % (st.st_size, h.hexdigest())
+        _FILE_SIGS[key] = sig
+    return sig

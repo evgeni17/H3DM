@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.0 — 2026-10-07
+Release 0.4: export to Rhino. Assets `::4.0` are frozen with this code (`python3.13libs/h3dm_4_0`).
+Checked on the user's real model (114 Breps, 3873 faces, 113 solids): Rhino -> Houdini -> Rhino in Mesh + Curves and
+All NURBS keeps every Brep exact and every solid closed (export 6–8 s); objects moved as a whole, a changed
+global Xform and edits that keep the vertices (opened polygons) are handled; models made in Houdini from scratch
+export as exact NURBS where possible. Known limits of the Rhino rebuild are documented in README.
+Development of 0.4 in detail: 0.4.0-dev.1 … dev.10 below.
+
 ## 0.4.0-dev.10 — 2026-10-07
 * **Fix: the geometry-signature fast path missed edits that keep every vertex.** Opening the polygons of a meshed
   Brep (they became polylines) still matched the import signature, so the source Brep was written instead of the

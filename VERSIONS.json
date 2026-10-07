@@ -12,9 +12,9 @@
       "note": "All nodes made before asset versioning (H3DM 0.3.x - 0.4.0-dev.6)."
     },
     "4.0": {
-      "status": "development",
+      "status": "frozen",
       "plugin": "0.4.0",
-      "package": "h3dm",
+      "package": "h3dm_4_0",
       "rhino3dm": "8.35.0",
       "houdini": "22.0.429",
       "python": "3.13",
