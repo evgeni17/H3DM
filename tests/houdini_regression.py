@@ -878,7 +878,7 @@ def run_export_new():
         box = tmp.createNode("box", "box")                                   # 6 четырёхугольников, связный
         box2 = tmp.createNode("box", "box2")
         box2.parmTuple("t").set((5, 0, 0))
-        sph = tmp.createNode("sphere", "sph")                                # примитив Sphere -> сетка
+        sph = tmp.createNode("sphere", "sph")                                # примитив Sphere -> NURBS
         sph.parmTuple("t").set((0, 5, 0))
         circ = tmp.createNode("circle", "circ")                              # замкнутая NURBS -> периодическая
         circ.parm("type").set("nurbs")
@@ -908,7 +908,8 @@ def run_export_new():
         for o in f.Objects:
             k = rr.enum_name(o.Geometry.ObjectType)
             kinds[k] = kinds.get(k, 0) + 1
-        if kinds.get("Mesh") != 4 or kinds.get("Curve") != 2 or kinds.get("TextDot") != 1:
+        # сфера-примитив теперь точная NURBS-поверхность (Brep), остальное — сетки
+        if kinds.get("Mesh") != 3 or kinds.get("Brep") != 1 or kinds.get("Curve") != 2 or kinds.get("TextDot") != 1:
             fails.append("export new: kinds %s" % kinds)
         for o in f.Objects:
             g = o.Geometry
@@ -1460,7 +1461,95 @@ def run_versions():
     return fails
 
 
+def run_export_scratch():
+    """Модель, созданная в Houdini с нуля: обрезанная NURBS с отверстием (Rhino или сетка), примитивы сфера и
+    окружность -> точные NURBS, Bezier -> NURBS, scatter -> одно облако точек."""
+    import math
+    import shutil
+    import tempfile
+    import numpy as np
+    from h3dm import sop_export as se, rhino_read as rr, houjson as hj, rhino_bridge as rb
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_scratch_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_scratch")
+    try:
+        def export(name, node, **parms):
+            ex = tmp.createNode("h3dm::3dm_export")
+            ex.setInput(0, node)
+            ex.parm("file").set(os.path.join(out_dir, name + ".3dm"))
+            for k, v in parms.items():
+                ex.parm(k).set(v)
+            text, path = se.run(ex, write=True)
+            return text, [o.Geometry for o in rr.read(path).Objects]
+
+        # 1) обрезанная NURBS из Houdini (не из импорта): внешняя петля + отверстие
+        fn = os.path.join(out_dir, "t.bgeo")
+        ang = np.linspace(0, 2 * np.pi, 33)
+
+        def crv(pts):
+            n = len(pts)
+            return {"order": 2, "knots": [0, 0] + list(range(1, n - 1)) + [n - 1, n - 1], "cv": pts}
+        hj.dump([{"kind": "surface", "cv": np.array([[[0, 0, 0], [2, 0, 0]], [[0, 0, 2], [2, 0, 2]]], dtype=float),
+                  "w": np.ones((2, 2)), "order_u": 2, "order_v": 2, "knots_u": [0, 0, 2, 2], "knots_v": [0, 0, 2, 2],
+                  "trims": [[crv([(0, 0), (2, 0), (2, 2), (0, 2), (0, 0)])],
+                            [crv([(1 + 0.3 * math.cos(a), 1 + 0.3 * math.sin(a)) for a in ang[::-1]])]]}], fn)
+        g = hou.Geometry()
+        g.loadFromFile(fn)
+        st = tmp.createNode("stash", "native_trim")
+        st.parm("stash").set(g)
+        if rb.list_instances():
+            text, objs = export("native_trim", st)
+            loops = [sum(len(b.Faces[i].Loops) for i in range(len(b.Faces))) for b in objs if rr.enum_name(b.ObjectType) == "Brep"]
+            if loops != [2]:
+                fails.append("scratch: Houdini trimmed NURBS -> %s loops" % loops)
+        text, objs = export("native_trim_mesh", st, trimmed="mesh")
+        if [rr.enum_name(b.ObjectType) for b in objs] != ["Mesh"]:
+            fails.append("scratch: trimmed NURBS without Rhino -> %s" % [rr.enum_name(b.ObjectType) for b in objs])
+        # 2) сфера-примитив -> точная NURBS-поверхность радиуса 1000 мм
+        text, objs = export("sphere", tmp.createNode("sphere"))
+        s = objs[0].Faces[0].UnderlyingSurface() if objs and rr.enum_name(objs[0].ObjectType) == "Brep" else None
+        if s is None:
+            fails.append("scratch: sphere -> %s" % [rr.enum_name(b.ObjectType) for b in objs])
+        else:
+            du, dv = s.Domain(0), s.Domain(1)
+            d = [math.sqrt(sum(c * c for c in (p.X, p.Y, p.Z))) for p in
+                 (s.PointAt(du.T0 + (du.T1 - du.T0) * i / 7, dv.T0 + (dv.T1 - dv.T0) * j / 7) for i in range(8) for j in range(8))]
+            if max(abs(x - 1000.0) for x in d) > 0.01:
+                fails.append("scratch: sphere radius %.4f..%.4f" % (min(d), max(d)))
+        # 3) окружность Bezier и примитив-окружность -> замкнутые NURBS-кривые
+        for kind in ("bezier", "prim"):
+            c = tmp.createNode("circle")
+            c.parm("type").set(kind)
+            text, objs = export("circle_" + kind, c)
+            ok = len(objs) == 1 and rr.enum_name(objs[0].ObjectType) == "Curve" and objs[0].IsClosed
+            if ok:
+                dd = objs[0].Domain
+                d = [math.sqrt(sum(v * v for v in (p.X, p.Y, p.Z))) for p in
+                     (objs[0].PointAt(dd.T0 + (dd.T1 - dd.T0) * i / 32) for i in range(33))]
+                ok = max(abs(x - 1000.0) for x in d) < 1.0
+            if not ok:
+                fails.append("scratch: %s circle -> %s" % (kind, [rr.enum_name(b.ObjectType) for b in objs]))
+        # 4) Bezier-поверхность -> поверхность (Brep), не сетка
+        gb = tmp.createNode("grid")
+        gb.parm("type").set("bezier")
+        text, objs = export("bezier_grid", gb)
+        if [rr.enum_name(b.ObjectType) for b in objs] != ["Brep"]:
+            fails.append("scratch: Bezier grid -> %s" % [rr.enum_name(b.ObjectType) for b in objs])
+        # 5) scatter 500 точек -> одно облако
+        sc = tmp.createNode("scatter")
+        sc.setInput(0, tmp.createNode("box"))
+        sc.parm("npts").set(500)
+        text, objs = export("scatter", sc)
+        if [rr.enum_name(b.ObjectType) for b in objs] != ["PointSet"] or objs[0].Count != 500:
+            fails.append("scratch: scatter -> %s" % [rr.enum_name(b.ObjectType) for b in objs][:4])
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export scratch: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run_versions() + run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
-          + run_block_ids() + run_constant_attribs() + run_export() + run_export_new()
+          + run_block_ids() + run_constant_attribs() + run_export() + run_export_new() + run_export_scratch()
           + run_export_passthrough() + run_export_changes() + run_export_rhino()
           + run_export_real())

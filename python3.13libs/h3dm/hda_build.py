@@ -347,7 +347,8 @@ def _export_ptg():
                               help="Convert LOD for trimmed faces (divisions per span)."),
         _toggle("textdots", "Points with s@text to Text Dots", True),
         _toggle("points", "Other Points to Point Objects", True,
-                help="Points without primitives; several points with one rhino_id become a point cloud."),
+                help="Points without primitives; points with one rhino_id, or (for points made in Houdini) with one "
+                     "layer and name, become one point cloud."),
         _menu("packed", "Packed Primitives", [("blocks", "Blocks"), ("explode", "Explode to Objects")],
               help="Blocks: packed primitives with their own geometry become block insertions (one definition per "
                    "shared geometry, nested blocks too, full 4x4 transform in double precision, mirrored and "

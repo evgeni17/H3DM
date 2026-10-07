@@ -267,13 +267,24 @@ class Writer(object):
     def _rhino_knots(full):
         return [float(k) for k in list(full)[1:-1]]
 
+    @staticmethod
+    def _wrap_count(n, order, n_knots):
+        """Сколько управляющих точек повторить у замкнутой кривой Houdini: периодическая (узлы n + 2k - 1) —
+        k - 1 точек; замкнутая с зажатыми концами (из Bezier, примитивов; узлы n + 1 + k) — одну."""
+        if n_knots == n + 2 * order - 1:
+            return order - 1
+        if n_knots == n + 1 + order:
+            return 1
+        return order - 1
+
     def nurbs_curve(self, cv, w, order, knots_full, closed=False):
         r = _r()
         cv = np.asarray(cv, dtype=np.float64).reshape(-1, 3)
         w = np.asarray(w, dtype=np.float64).reshape(-1)
         if closed:
-            cv = np.concatenate([cv, cv[:order - 1]])
-            w = np.concatenate([w, w[:order - 1]])
+            m = self._wrap_count(len(cv), order, len(knots_full))
+            cv = np.concatenate([cv, cv[:m]])
+            w = np.concatenate([w, w[:m]])
         n = len(cv)
         kn = self._rhino_knots(knots_full)
         if len(kn) != n + order - 2:
@@ -300,11 +311,13 @@ class Writer(object):
         cv = np.asarray(cv, dtype=np.float64)
         w = np.asarray(w, dtype=np.float64)
         if wrap_u:
-            cv = np.concatenate([cv, cv[:, :order_u - 1]], axis=1)
-            w = np.concatenate([w, w[:, :order_u - 1]], axis=1)
+            m = self._wrap_count(cv.shape[1], order_u, len(knots_u_full))
+            cv = np.concatenate([cv, cv[:, :m]], axis=1)
+            w = np.concatenate([w, w[:, :m]], axis=1)
         if wrap_v:
-            cv = np.concatenate([cv, cv[:order_v - 1]], axis=0)
-            w = np.concatenate([w, w[:order_v - 1]], axis=0)
+            m = self._wrap_count(cv.shape[0], order_v, len(knots_v_full))
+            cv = np.concatenate([cv, cv[:m]], axis=0)
+            w = np.concatenate([w, w[:m]], axis=0)
         nv, nu = cv.shape[:2]
         ku, kv = self._rhino_knots(knots_u_full), self._rhino_knots(knots_v_full)
         if len(ku) != nu + order_u - 2 or len(kv) != nv + order_v - 2:

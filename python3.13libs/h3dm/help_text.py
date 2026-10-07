@@ -281,7 +281,10 @@ writing. The report (and the read-back check) is on the *Report* tab.
 * Closed polygons: one mesh per Rhino object of the import (`rhino_id`, or `rhino_instance_id` + `rhino_part_path`
   for parts of blocks); new geometry is split by connectivity. Polygons with more than 4 sides are divided.
 * Open polygons: polylines. NURBS curves: exact NURBS curves (closed Houdini curves become periodic).
-* NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini).
+* NURBS surfaces: exact untrimmed NURBS surfaces (normals as shown in Houdini; closed ones too). NURBS surfaces
+  trimmed in Houdini (Trim, Profile ...) are treated like trimmed faces of the import (below), so holes are kept.
+* Other primitive types: Bezier curves and circles become exact NURBS curves; Bezier surfaces, spheres and tubes
+  exact NURBS surfaces; metaballs, polysoups, volumes and the rest polygons.
 * Changed objects with trimmed NURBS faces (`rhino_trimmed_exact`), __Trimmed Surfaces__ = *Rebuild in Rhino*
   (default): all NURBS faces of the object are sent to a running Rhino 8 (the same one Prepare in Rhino uses; your
   open document is not touched) and rebuilt there as exact trimmed faces — the surface as it is in Houdini, the
@@ -296,7 +299,8 @@ writing. The report (and the read-back check) is on the *Report* tab.
   too) and insertions with their full 4x4 transform; an insertion that was not moved keeps the exact double
   matrix of the import (`rhino_xform`). *Pack per Object* of the import is always exploded. *Explode*: every part
   is its own object.
-* Points without primitives: text dots (`s@text`), points or point clouds (one per `rhino_id`).
+* Points without primitives: text dots (`s@text`), points or point clouds — one cloud per `rhino_id`, and for
+  points made in Houdini (scatter ...) one cloud per layer and name; a single point is a point object.
 
 @xform Coordinates and units
 
@@ -355,7 +359,10 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
 * Замкнутые полигоны: одна сетка на объект Rhino импорта (`rhino_id`, у частей блоков — `rhino_instance_id` +
   `rhino_part_path`); новая геометрия делится по связности. Многоугольники больше 4 сторон разбиваются.
 * Открытые полигоны — полилинии. NURBS-кривые — точные NURBS (замкнутые кривые Houdini — периодические).
-* NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini).
+* NURBS-поверхности — точные необрезанные NURBS (нормали — как в Houdini; замкнутые тоже). NURBS, обрезанные в
+  Houdini (Trim, Profile ...), обрабатываются как обрезанные грани импорта (ниже) — отверстия сохраняются.
+* Прочие типы примитивов: Bezier-кривые и окружности — точные NURBS-кривые; Bezier-поверхности, сферы и трубки —
+  точные NURBS-поверхности; metaball, polysoup, объёмы и остальное — полигоны.
 * Изменённые объекты с обрезанными NURBS-гранями (`rhino_trimmed_exact`), __Trimmed Surfaces__ = *Rebuild in
   Rhino* (по умолчанию): все NURBS-грани объекта отправляются в запущенный Rhino 8 (тот же, что для Prepare in
   Rhino; открытый документ не трогается) и собираются там точными обрезанными гранями — поверхность как в
@@ -371,7 +378,8 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
 * Packed-примитивы (__Packed Primitives__ = *Blocks*): определения блоков (одно на общую геометрию, вложенные
   тоже) и вставки с полной матрицей 4x4; несдвинутая вставка сохраняет точную матрицу импорта в double
   (`rhino_xform`). *Pack per Object* импорта всегда раскрывается. *Explode* — каждая часть отдельным объектом.
-* Точки без примитивов: текстовые метки (`s@text`), точки или облака точек (одно на `rhino_id`).
+* Точки без примитивов: текстовые метки (`s@text`), точки или облака точек — одно облако на `rhino_id`, а для
+  точек, созданных в Houdini (scatter ...), — одно на слой и имя; одиночная точка — точечный объект.
 
 @xform Координаты и единицы
 

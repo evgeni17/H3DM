@@ -16,6 +16,20 @@ All NURBS 20 s -> 7.4 s, Mesh + Curves 35 s -> 8.7 s; of that, about 4.5 s is rh
   passthrough mask is read as an attribute.
 * Mesh + Curves without passthrough also gets faster (23 s -> 8 s).
 
+Models made in Houdini from scratch (checked: trimmed NURBS, spheres, tubes, circles, Bezier curves and surfaces,
+metaballs, polysoups, scatter, packed copies, thousands of separate pieces):
+* **NURBS surfaces trimmed in Houdini** (Trim, Profile ...) lost their trims and holes — they were written as the
+  untrimmed surface. Their trim curves are now read and they go the way of trimmed import faces (rebuilt in Rhino,
+  else planes / meshes).
+* **Closed NURBS from Houdini** (spheres, tubes, closed curves with clamped ends, e.g. converted from Bezier) were
+  skipped ("knots do not match"): the closing control points are now added per knot layout (periodic: order-1,
+  clamped closed: one), before U is reversed.
+* **Other primitive types** are converted exactly where possible: Bezier curves and circles -> NURBS curves,
+  Bezier surfaces, spheres and tubes -> NURBS surfaces (a sphere comes back as an exact rational surface,
+  radius 1000.000 mm); the rest -> polygons as before.
+* **Points made in Houdini** (scatter ...) become one point cloud per layer and name instead of one object per point.
+* Test `run_export_scratch`.
+
 ## 0.4.0-dev.7 — 2026-10-07
 Asset versions follow the release; nodes in working scenes never change.
 * Node types are versioned by release: release 0.N -> `h3dm::3dm_import::N.0` (0.4 -> `::4.0`); Houdini keeps all

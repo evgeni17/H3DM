@@ -140,9 +140,13 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
     if unpacked:
         _finish_unpack(geo)
     _mark_free_points(geo)
+    geo = _convert_other(geo, keep_blocks)
     # неизменённые объекты Brep/Extrusion: исходная геометрия из файла импорта (до любых преобразований)
     if pt:
         _mark_passthrough(geo, pt)
+    # обрезанные NURBS, сделанные в Houdini (Trim, Profile ...), — в ту же группу, что обрезанные грани импорта:
+    # их обрезка не пропадёт (пересборка в Rhino или плоскость / сетка)
+    _mark_native_trims(geo)
     trimmed_mode = _p(node, "trimmed", "rhino")
     # изменённые объекты с обрезанными гранями -> пересборка в запущенном Rhino (точные Brep, объединённые)
     if trimmed_mode == "rhino" and rt is not None:
@@ -187,21 +191,6 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
     tc = geo.findPrimGroup(TRIM_CURVES)
     if tc is not None and tc.primCount():
         geo.deletePrims(tc.prims())
-    # прочие типы (сферы, трубки, Bezier, metaball, polysoup ...) -> полигоны
-    keep = (hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface)
-    n_keep = sum(geo.countPrimType(t) for t in keep)
-    # обход всех примитивов через HOM — только если есть другие типы (миллион полигонов — секунды)
-    other = [] if n_keep == geo.intrinsicValue("primitivecount") else \
-        [p for p in geo.prims() if p.type() not in keep and not (keep_blocks and _is_block(geo, p))]
-    if other:
-        tmp = geo.createPrimGroup("__h3dm_other")
-        tmp.add(other)
-        out = hou.Geometry()
-        _verb("convert", {"group": "__h3dm_other", "totype": 0, "lodu": 1.0, "lodv": 1.0}).execute(out, [geo])
-        geo = out
-        g = geo.findPrimGroup("__h3dm_other")
-        if g is not None:
-            g.destroy()
     # многоугольники > 4 сторон -> треугольники/четырёхугольники (Rhino Mesh: 3–4 вершины)
     n = geo.intrinsicValue("primitivecount")
     done = (np.frombuffer(geo.primIntAttribValuesAsString("__h3dm_pass"), dtype=np.int32) != 0
@@ -715,6 +704,73 @@ def _topology(geo):
     return topology(geo)
 
 
+_TO_NURBS_CURVE = ("BezierCurve", "Circle")
+_TO_NURBS_SURF = ("BezierSurface", "Sphere", "Tube")
+
+
+def _convert_other(geo, keep_blocks):
+    """Прочие типы примитивов: Bezier-кривые и окружности -> NURBS-кривые, Bezier-поверхности, сферы и трубки ->
+    NURBS-поверхности (точно, без потери формы); остальное (metaball, polysoup, объёмы ...) -> полигоны."""
+    keep = (hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface)
+    n_keep = sum(geo.countPrimType(t) for t in keep)
+    # обход всех примитивов через HOM — только если есть другие типы (миллион полигонов — секунды)
+    if n_keep == geo.intrinsicValue("primitivecount"):
+        return geo
+    buckets = {4: [], 5: [], 0: []}
+    for p in geo.prims():
+        t = p.type()
+        if t in keep or (keep_blocks and _is_block(geo, p)) or t in _PACKED:
+            continue
+        name = t.name()
+        buckets[4 if name in _TO_NURBS_CURVE else 5 if name in _TO_NURBS_SURF else 0].append(p)
+    # группы по целевому типу ставятся заранее: имена групп переживают Convert, номера примитивов — нет
+    for totype, prims in buckets.items():
+        if prims:
+            geo.createPrimGroup("__h3dm_other%d" % totype).add(prims)
+    for totype in (4, 5, 0):
+        if not buckets[totype]:
+            continue
+        out = hou.Geometry()
+        _verb("convert", {"group": "__h3dm_other%d" % totype, "totype": totype,
+                          "lodu": 1.0, "lodv": 1.0}).execute(out, [geo])
+        geo = out
+    for totype in (4, 5, 0):
+        g = geo.findPrimGroup("__h3dm_other%d" % totype)
+        if g is not None:
+            g.destroy()
+    # что не стало NURBS/полигонами (тип не поддержан Convert) — в полигоны
+    if sum(geo.countPrimType(t) for t in keep) + sum(geo.countPrimType(t) for t in _PACKED) \
+            < geo.intrinsicValue("primitivecount"):
+        rest = [p for p in geo.prims() if p.type() not in keep and p.type() not in _PACKED]
+        if rest:
+            geo.createPrimGroup("__h3dm_rest").add(rest)
+            out = hou.Geometry()
+            _verb("convert", {"group": "__h3dm_rest", "totype": 0, "lodu": 1.0, "lodv": 1.0}).execute(out, [geo])
+            geo = out
+            g = geo.findPrimGroup("__h3dm_rest")
+            if g is not None:
+                g.destroy()
+    return geo
+
+
+def _mark_native_trims(geo):
+    """NURBS-поверхности с кривыми обрезки, не из импорта H3DM (не в rhino_trimmed_exact) -> в эту группу."""
+    tg = geo.findPrimGroup(TRIM_GROUPS[0])
+    skip = {p.number() for g in (tg, geo.findPrimGroup(UNTRIMMED_APPROX)) if g is not None for p in g.prims()}
+    if geo.findPrimAttrib("__h3dm_pass") is not None:
+        skip |= set(np.nonzero(np.frombuffer(geo.primIntAttribValuesAsString("__h3dm_pass"), dtype=np.int32))[0].tolist())
+    cand = [p.number() for p in geo.iterPrimsOfType(hou.primType.NURBSSurface) if p.number() not in skip]
+    if not cand:
+        return 0
+    cur = _trim_curves(geo, cand)
+    found = [geo.prim(pn) for pn in cand if pn in cur and cur[pn][1]]
+    unknown = [pn for pn in cand if pn not in cur]
+    if found or unknown:
+        tg = tg or geo.createPrimGroup(TRIM_GROUPS[0])
+        tg.add(found + [geo.prim(pn) for pn in unknown])     # не прочитана — считаем обрезанной (Convert учтёт)
+    return len(found)
+
+
 def _mark_free_points(geo):
     """Точки без примитивов во входе (облака, точки, метки) помечаются ДО преобразований: Convert, удаление
     служебных примитивов и т.п. оставляют лишние точки, которые не должны стать объектами Rhino."""
@@ -1181,14 +1237,24 @@ def collect(node):
                 idx = vpts[voff[i]:voff[i + 1]].reshape(nv, nu)
                 cv = to_file(P[idx.reshape(-1)]).reshape(nv, nu, 3)
                 w = pw[idx] if has_pw else np.ones((nv, nu))
-                # Houdini: нормаль противоположна Rhino (u x v) — разворачиваем U обратно (см. импорт)
                 ku = list(prim.intrinsicValue("uknots"))
+                kv = list(prim.intrinsicValue("vknots"))
+                ou, ov = int(prim.intrinsicValue("uorder")), int(prim.intrinsicValue("vorder"))
+                # замкнутая поверхность Houdini (сферы, трубки, Rotate): повторяющиеся точки добавляются ДО
+                # разворота U, иначе сдвинутся интервалы узлов
+                from .rhino_write import Writer
+                if prim.intrinsicValue("uwrap"):
+                    m = Writer._wrap_count(nu, ou, len(ku))
+                    cv, w = np.concatenate([cv, cv[:, :m]], axis=1), np.concatenate([w, w[:, :m]], axis=1)
+                if prim.intrinsicValue("vwrap"):
+                    m = Writer._wrap_count(nv, ov, len(kv))
+                    cv, w = np.concatenate([cv, cv[:m]], axis=0), np.concatenate([w, w[:m]], axis=0)
+                # Houdini: нормаль противоположна Rhino (u x v) — разворачиваем U обратно (см. импорт)
                 a0, b0 = ku[0], ku[-1]
                 order_keys.append(("obj", {"kind": "surface", "geom": {
-                    "cv": cv[:, ::-1], "w": w[:, ::-1], "order_u": int(prim.intrinsicValue("uorder")),
-                    "order_v": int(prim.intrinsicValue("vorder")), "knots_u": [a0 + b0 - x for x in reversed(ku)],
-                    "knots_v": list(prim.intrinsicValue("vknots")),
-                    "wrap_u": bool(prim.intrinsicValue("uwrap")), "wrap_v": bool(prim.intrinsicValue("vwrap"))},
+                    "cv": cv[:, ::-1], "w": w[:, ::-1], "order_u": ou, "order_v": ov,
+                    "knots_u": [a0 + b0 - x for x in reversed(ku)], "knots_v": kv,
+                    "wrap_u": False, "wrap_v": False},
                     "attrs": attrs_of(i, prim)}))
 
         for kind, item in order_keys:
@@ -1238,8 +1304,12 @@ def collect(node):
                                                                  "pt": to_file([pt.position()])[0]}, "attrs": pattrs(pt)})
             if others and _p(node, "points", 0):
                 byobj = {}
+                # точки одного объекта Rhino (rhino_id) — одно облако; точки без rhino_id (scatter и т.п.) —
+                # одно облако на слой + имя: тысячи точек не становятся тысячами объектов
+                lay_a, nam_a = _p(node, "layerattrib", "layer") or "layer", _p(node, "nameattrib", "name") or "name"
                 for pt in others:
-                    byobj.setdefault(pt_attr("rhino_id", pt) or ("pt", pt.number()), []).append(pt)
+                    byobj.setdefault(pt_attr("rhino_id", pt) or ("cloud", pt_attr(lay_a, pt), pt_attr(nam_a, pt)),
+                                     []).append(pt)
                 for k, pts in byobj.items():
                     Pp = to_file([p.position() for p in pts])
                     attrs = pattrs(pts[0])
