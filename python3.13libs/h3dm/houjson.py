@@ -89,6 +89,132 @@ def binary(doc):
     return b"".join(out)
 
 
+# ---------------------------------------------------------------- чтение двоичного JSON (hou.Geometry.data())
+
+_NUM = {0x11: ("<i1", 1), 0x12: ("<i2", 2), 0x13: ("<i4", 4), 0x14: ("<i8", 8),
+        0x18: ("<f2", 2), 0x19: ("<f4", 4), 0x1A: ("<f8", 8), 0x21: ("<u1", 1), 0x22: ("<u2", 2)}
+
+
+def read_binary(b):
+    """Двоичный JSON Houdini (.bgeo, hou.Geometry.data()) -> объекты Python; однородные массивы — numpy.
+    Токены: [ ] { } 0x5b 0x5d 0x7b 0x7d; строка 0x27; определение/ссылка строки 0x2b/0x26; числа 0x11-0x14,
+    0x18-0x1a, 0x21-0x22; true/false 0x31/0x30, bool 0x10; null 0x00; однородный массив 0x40 (bool — по битам)."""
+    if b[:5] != _MAGIC:
+        raise ValueError("not a binary Houdini JSON")
+    mv = memoryview(b)
+    pos = 5
+    tokens = {}
+    from struct import unpack_from
+
+    def ln():
+        nonlocal pos
+        c = b[pos]
+        pos += 1
+        if c < 0xF1:
+            return c
+        if c == 0xF2:
+            v = unpack_from("<H", b, pos)[0]
+            pos += 2
+        elif c == 0xF4:
+            v = unpack_from("<I", b, pos)[0]
+            pos += 4
+        elif c == 0xF8:
+            v = unpack_from("<Q", b, pos)[0]
+            pos += 8
+        else:
+            raise ValueError("bad length 0x%x at %d" % (c, pos - 1))
+        return v
+
+    def val():
+        nonlocal pos
+        while True:
+            c = b[pos]
+            pos += 1
+            if c == 0x2B:                          # определение строки-токена, затем значение
+                tid = ln()
+                n = ln()
+                tokens[tid] = bytes(mv[pos:pos + n]).decode("utf-8")
+                pos += n
+                continue
+            if c == 0x2D:                          # удаление токена
+                tokens.pop(ln(), None)
+                continue
+            if c in (0x3A, 0x2C):                  # разделители (в двоичном обычно не пишутся)
+                continue
+            break
+        if c == 0x5B:
+            out = []
+            while True:
+                while b[pos] in (0x2B, 0x2D):
+                    val_token_def()
+                if b[pos] == 0x5D:
+                    pos += 1
+                    return out
+                out.append(val())
+        if c == 0x7B:
+            out = {}
+            while True:
+                while b[pos] in (0x2B, 0x2D):
+                    val_token_def()
+                if b[pos] == 0x7D:
+                    pos += 1
+                    return out
+                k = val()
+                out[k] = val()
+        if c == 0x27:
+            n = ln()
+            s_ = bytes(mv[pos:pos + n]).decode("utf-8")
+            pos += n
+            return s_
+        if c == 0x26:
+            return tokens[ln()]
+        if c == 0x31:
+            return True
+        if c == 0x30:
+            return False
+        if c == 0x10:
+            v = b[pos] != 0
+            pos += 1
+            return v
+        if c == 0x00:
+            return None
+        if c in _NUM:
+            dt, sz = _NUM[c]
+            v = np.frombuffer(b, dtype=dt, count=1, offset=pos)[0]
+            pos += sz
+            return v.item()
+        if c == 0x40:
+            t = b[pos]
+            pos += 1
+            n = ln()
+            if t == 0x10:                          # bool: биты, младший первым
+                nb = (n + 7) // 8
+                bits = np.unpackbits(np.frombuffer(b, dtype=np.uint8, count=nb, offset=pos), bitorder="little")[:n]
+                pos += nb
+                return bits.astype(bool)
+            if t not in _NUM:
+                raise ValueError("uniform array of type 0x%x" % t)
+            dt, sz = _NUM[t]
+            a = np.frombuffer(b, dtype=dt, count=n, offset=pos)
+            pos += n * sz
+            return a
+        raise ValueError("token 0x%x at %d" % (c, pos - 1))
+
+    def val_token_def():
+        nonlocal pos
+        c = b[pos]
+        pos += 1
+        if c == 0x2B:
+            tid = ln()
+            n = ln()
+            tokens[tid] = bytes(mv[pos:pos + n]).decode("utf-8")
+            pos += n
+        else:
+            tokens.pop(ln(), None)
+
+    return val()
+
+
 def _ascii_default(o):
     if isinstance(o, np.ndarray):
         return o.tolist()
@@ -235,7 +361,7 @@ def _iter_prims(prims):
             yield head.get("type"), _kv(pr[1])
 
 
-def _attr_values(vals, size):
+def _attr_values(vals, size, count=None):
     """Значения атрибута точек из .geo (tuples / arrays / rawpagedata) -> массив (n, size)."""
     v = _kv(vals)
     if "tuples" in v:
@@ -245,19 +371,30 @@ def _attr_values(vals, size):
     if "rawpagedata" in v:
         raw = np.asarray(v["rawpagedata"], dtype=np.float64).reshape(-1)
         pagesize = int(v.get("pagesize", 1024))
-        packing = v.get("packing")
-        if size == 1 or not packing or list(packing) == [size]:
+        packing = [int(w) for w in (v.get("packing") or [size])]
+        flags = v.get("constantpageflags")
+        if flags is None and len(packing) == 1:
             return raw.reshape(-1, size)
-        # упаковка по компонентам внутри страницы: [[x...][y...][z...]] на страницу
-        out, i = [], 0
-        while i < len(raw):
-            n = min(pagesize, (len(raw) - i) // size)
-            page = []
-            for w in packing:
-                page.append(raw[i:i + n * int(w)].reshape(n, int(w)))
-                i += n * int(w)
-            out.append(np.hstack(page))
-        return np.vstack(out) if out else np.zeros((0, size))
+        if count is None:
+            raise ValueError("paged attribute without point count")
+        # страницы по pagesize элементов; внутри страницы — подвекторы packing подряд; постоянная страница
+        # (constantpageflags) хранит одно значение подвектора
+        npages = (count + pagesize - 1) // pagesize
+        out = np.zeros((count, size))
+        i = 0
+        for pg in range(npages):
+            n = min(pagesize, count - pg * pagesize)
+            col = 0
+            for k, w in enumerate(packing):
+                const = bool(flags[k][pg]) if flags is not None and len(flags) > k and len(flags[k]) > pg else False
+                if const:
+                    out[pg * pagesize:pg * pagesize + n, col:col + w] = raw[i:i + w]
+                    i += w
+                else:
+                    out[pg * pagesize:pg * pagesize + n, col:col + w] = raw[i:i + n * w].reshape(n, w)
+                    i += n * w
+                col += w
+        return out
     raise ValueError("unsupported attribute values")
 
 
@@ -277,7 +414,7 @@ def profile_regions_doc(doc):
     for a in _kv(d.get("attributes", [])).get("pointattributes", []):
         head, body = _kv(a[0]), _kv(a[1])
         if head.get("name") == "P":
-            P = _attr_values(body["values"], int(body.get("size", 3)))
+            P = _attr_values(body["values"], int(body.get("size", 3)), int(d.get("pointcount", 0)))
     topo = _kv(d.get("topology", []))
     ref = _kv(topo.get("pointref", []))
     idx = np.asarray(ref.get("indices", []), dtype=np.int64)

@@ -94,21 +94,22 @@ def surface_matches(h, face, scale, tol):
     return pair is not None and float(np.abs(pair[0] - pair[1]).max()) <= tol
 
 
-def trims_match(src_geom, sigs):
+def trims_match(src_geom, sigs, check_source=True):
     """Обрезка: sigs = {номер грани: (подпись из атрибута rhino_trim_sig, подпись кривых обрезки примитива
     сейчас)}. Совпадать должны обе части: кривые в Houdini не трогали и обрезка исходника та же, что при импорте."""
     from .rhino_read import brep_trims, face_trims_hash
     brep = _faces_of(src_geom)
     if brep is None:
         return False
-    tr = brep_trims(brep)
+    # исходный файл тот же, что при импорте (отпечаток содержимого) — его обрезку не пересчитываем
+    tr = brep_trims(brep) if check_source else None
     for fi, (attr, now) in sigs.items():
         if not attr or ":" not in attr:
             return False                                   # импорт старой версии — проверить нельзя
         h_sig, src_sig = attr.split(":", 1)
         if h_sig != now:
             return False
-        if src_sig != face_trims_hash(tr.get(fi) if tr else None):
+        if check_source and src_sig != face_trims_hash(tr.get(fi) if tr else None):
             return False
     return True
 

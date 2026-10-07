@@ -152,19 +152,19 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
     for name in ("__h3dm_pass", "__h3dm_rt"):
         g = geo.findPrimGroup(name)
         if g is not None:
-            done.add(g.prims())
-    pg = done if done.prims() else None
+            done.add(g)                       # группа целиком (без списка примитивов в Python)
+    pg = done if done.primCount() else None
     # обрезанные плоские грани с одной (внешней) петлёй -> точная обрезанная плоскость (Brep без Rhino)
     n_plane = _mark_trimmed_planes(geo, pg)
     trim_grp = [g for g in (geo.findPrimGroup(n) for n in TRIM_GROUPS) if g is not None]
     if pg is not None:
         for g in trim_grp:
-            g.remove(pg.prims())
+            g.remove(pg)
     if n_plane:
         tp = geo.findPrimGroup("__h3dm_tplane")
         for g in trim_grp:
-            g.remove(tp.prims())
-    n_trim = sum(len(g.prims()) for g in trim_grp)
+            g.remove(tp)
+    n_trim = sum(g.primCount() for g in trim_grp)
     if n_trim:
         if trimmed_mode == "skip":
             for g in trim_grp:
@@ -178,18 +178,21 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
     approx = geo.findPrimGroup(UNTRIMMED_APPROX)
     pg = geo.findPrimGroup("__h3dm_done")
     if approx is not None and pg is not None:
-        approx.remove(pg.prims())          # неизменённые объекты уходят исходной геометрией — грани нужны
-    if approx is not None and approx.prims():
-        n = len(approx.prims())
+        approx.remove(pg)                  # неизменённые объекты уходят исходной геометрией — грани нужны
+    if approx is not None and approx.primCount():
+        n = approx.primCount()
         geo.deletePrims(approx.prims())
         warn.append("%d faces were imported without trim data (group %s, untrimmed approximation) and are NOT "
                     "exported: import the file after Prepare in Rhino." % (n, UNTRIMMED_APPROX))
     tc = geo.findPrimGroup(TRIM_CURVES)
-    if tc is not None and tc.prims():
+    if tc is not None and tc.primCount():
         geo.deletePrims(tc.prims())
     # прочие типы (сферы, трубки, Bezier, metaball, polysoup ...) -> полигоны
     keep = (hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface)
-    other = [p for p in geo.prims() if p.type() not in keep and not (keep_blocks and _is_block(geo, p))]
+    n_keep = sum(geo.countPrimType(t) for t in keep)
+    # обход всех примитивов через HOM — только если есть другие типы (миллион полигонов — секунды)
+    other = [] if n_keep == geo.intrinsicValue("primitivecount") else \
+        [p for p in geo.prims() if p.type() not in keep and not (keep_blocks and _is_block(geo, p))]
     if other:
         tmp = geo.createPrimGroup("__h3dm_other")
         tmp.add(other)
@@ -200,10 +203,16 @@ def prepare_geometry(src, node, warn, keep_blocks=False, pt=None, rt=None):
         if g is not None:
             g.destroy()
     # многоугольники > 4 сторон -> треугольники/четырёхугольники (Rhino Mesh: 3–4 вершины)
-    pg = geo.findPrimGroup("__h3dm_done")
-    passed = {p.number() for p in pg.prims()} if pg is not None else set()
-    big = [p for p in geo.prims() if p.type() == hou.primType.Polygon and p.isClosed() and p.numVertices() > 4
-           and p.number() not in passed]
+    n = geo.intrinsicValue("primitivecount")
+    done = (np.frombuffer(geo.primIntAttribValuesAsString("__h3dm_pass"), dtype=np.int32) != 0
+            if geo.findPrimAttrib("__h3dm_pass") is not None else np.zeros(n, bool))
+    rg = geo.findPrimGroup("__h3dm_rt")
+    if rg is not None:
+        done = done.copy()
+        done[[p.number() for p in rg.prims()]] = True
+    off, _ = _topology(geo)
+    many = np.nonzero(((off[1:] - off[:-1]) > 4) & ~done)[0]          # кандидаты: > 4 вершин, не готовые
+    big = [p for p in (geo.prim(int(i)) for i in many) if p.type() == hou.primType.Polygon and p.isClosed()]
     if big:
         tmp = geo.createPrimGroup("__h3dm_ngons")
         tmp.add(big)
@@ -328,7 +337,18 @@ def _mark_passthrough(geo, pt):
     P = np.array(geo.pointFloatAttribValues("P"), dtype=np.float64).reshape(-1, 3)
     W = (np.array(geo.pointFloatAttribValues("Pw"), dtype=np.float64)
          if geo.findPointAttrib("Pw") is not None else np.ones(len(P)))
+    off, vpt = _topology(geo)
     to, scale = pt["to"], pt["scale"]
+    # быстрый путь: отпечаток объекта как при импорте и исходный файл тот же -> объект не менялся
+    fast = set()
+    if pt.get("file_sig_ok") and geo.findPrimAttrib("rhino_geo_sig") is not None:
+        from .geosig import object_signatures
+        now_sig = object_signatures(geo, (off, vpt), helper)
+        stored = {}
+        for r_, s_ in zip(rid, geo.primStringAttribValues("rhino_geo_sig")):
+            if r_ and s_ and r_ not in stored:
+                stored[r_] = s_
+        fast = {r_ for r_, s_ in now_sig.items() if stored.get(r_) == s_}
     # 1) геометрия граней (позиции, веса, узлы, порядки) — без обрезки
     cand = []                  # (rid, исходная геометрия, {грань: номер NURBS-примитива}, примитивы объекта)
     for r_id, faces in by_obj.items():
@@ -341,13 +361,21 @@ def _mark_passthrough(geo, pt):
         g = o.Geometry
         if enum_name(g.ObjectType) not in ("Brep", "Extrusion"):
             continue
+        if r_id in fast:
+            nprims = {fi: idx[0] for fi, idx in faces.items()
+                      if len(idx) == 1 and prims[idx[0]].type() == hou.primType.NURBSSurface}
+            if nprims and sig_attr is None:
+                pt["no_sig"] = pt.get("no_sig", 0) + 1
+                continue
+            cand.append((r_id, g, nprims, [i for idx in faces.values() for i in idx], None))
+            continue
         data, maxabs, ok, nprims = {}, 0.0, True, {}
         for fi, idx in faces.items():
             ps = [prims[i] for i in idx]
             if len(ps) == 1 and ps[0].type() == hou.primType.NURBSSurface:
                 pr = ps[0]
                 nu, nv = int(pr.intrinsicValue("nu")), int(pr.intrinsicValue("nv"))
-                vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)]).reshape(-1)
+                vi = vpt[off[pr.number()]:off[pr.number() + 1]]          # строками по V: v * nu + u
                 Ph = P[vi]
                 maxabs = max(maxabs, float(np.abs(Ph).max()))
                 data[fi] = ("nurbs", {"cv": to(Ph).reshape(nv, nu, 3), "w": W[vi].reshape(nv, nu),
@@ -358,7 +386,7 @@ def _mark_passthrough(geo, pt):
             elif all(p.type() == hou.primType.Polygon and p.isClosed() for p in ps):
                 pos = []
                 for p in ps:
-                    vi = [v.point().number() for v in p.vertices()][::-1]   # обход Houdini -> Rhino
+                    vi = vpt[off[p.number()]:off[p.number() + 1]][::-1]   # обход Houdini -> Rhino
                     Ph = P[vi]
                     maxabs = max(maxabs, float(np.abs(Ph).max()))
                     pos.append(to(Ph))
@@ -381,15 +409,21 @@ def _mark_passthrough(geo, pt):
     now = _trim_signatures(geo, sorted({pn for _, _, nprims, _, _ in cand for pn in nprims.values()}))
     for r_id, g, nprims, members, M in cand:
         sigs = {fi: (sig_attr[pn], now.get(pn)) for fi, pn in nprims.items()}
-        if sigs and not pth.trims_match(g, sigs):
+        if sigs and not pth.trims_match(g, sigs, check_source=not pt.get("file_sig_ok")):
             continue
         pt["map"][r_id] = g
         if M is not None:
             pt.setdefault("xform", {})[r_id] = M
         sel.extend(prims[i] for i in members)
+    pt["fast"] = len(fast & set(pt["map"]))      # перенесены после проверки по отпечатку
     if sel:
         grp = geo.findPrimGroup("__h3dm_pass") or geo.createPrimGroup("__h3dm_pass")
         grp.add(sel)
+        # то же атрибутом: чтение группы через HOM на миллионе примитивов — секунды, атрибута — мгновенно
+        mask = np.zeros(geo.intrinsicValue("primitivecount"), dtype=np.int32)
+        mask[[p.number() for p in sel]] = 1
+        geo.addAttrib(hou.attribType.Prim, "__h3dm_pass", 0)
+        geo.setPrimIntAttribValuesFromString("__h3dm_pass", mask.tobytes())
     return len(pt["map"])
 
 
@@ -447,8 +481,6 @@ def _dummy_trimmed():
 
 def _trim_curves_once(geo, numbers):
     """Один проход: {номер: (подпись, области)} только для надёжно прочитанных примитивов."""
-    import json
-    import tempfile
     from .houjson import profile_regions_doc, surface_profiles_checked, _signature
     if not numbers:
         return {}
@@ -467,17 +499,9 @@ def _trim_curves_once(geo, numbers):
     out = hou.Geometry()
     out.merge(_dummy_trimmed())               # первым — обрезанный примитив
     out.merge(sub)
-    fd, tmp = tempfile.mkstemp(suffix=".geo", prefix="h3dm_trims_")
-    os.close(fd)
-    try:
-        out.saveToFile(tmp)
-        with open(tmp, encoding="utf-8") as fh:
-            doc = json.load(fh)
-    finally:
-        try:
-            os.remove(tmp)
-        except OSError:
-            pass
+    # двоичный JSON в памяти: в ~20 раз быстрее записи и разбора текстового .geo
+    from .houjson import read_binary
+    doc = read_binary(out.data())
     profs = surface_profiles_checked(doc)[1:]       # без вспомогательного
     if len(profs) != len(numbers):
         return {}
@@ -542,7 +566,8 @@ def _rebuild_in_rhino(geo, rt, warn):
     def numbers(name):
         g = geo.findPrimGroup(name)
         return {p.number() for p in g.prims()} if g is not None else set()
-    skip = numbers("__h3dm_pass")
+    skip = (set(np.nonzero(np.frombuffer(geo.primIntAttribValuesAsString("__h3dm_pass"), dtype=np.int32))[0].tolist())
+            if geo.findPrimAttrib("__h3dm_pass") is not None else set())
     approx, helper = numbers(UNTRIMMED_APPROX), numbers(TRIM_CURVES)
     trimmed = {p.number() for p in tg.prims() if p.type() == NSURF and p.number() not in skip} if tg is not None else set()
     keys = _rt_keys(geo)
@@ -552,17 +577,17 @@ def _rebuild_in_rhino(geo, rt, warn):
     if geo.findPrimAttrib("rhino_face") is not None:
         rf = geo.primIntAttribValues("rhino_face")
         cnt = {}
-        for p in geo.prims():
+        for p in geo.iterPrimsOfType(NSURF):
             i = p.number()
-            if p.type() == NSURF and rf[i] >= 0 and i not in skip and not keys[i].startswith("prim"):
+            if rf[i] >= 0 and i not in skip and not keys[i].startswith("prim"):
                 cnt[keys[i]] = cnt.get(keys[i], 0) + 1
         want |= {k for k, c in cnt.items() if c >= 2}
     if not want:
         return 0
     members = {}
-    for prim in geo.prims():
+    for prim in geo.iterPrimsOfType(NSURF):
         i = prim.number()
-        if keys[i] in want and prim.type() == NSURF and i not in helper:
+        if keys[i] in want and i not in helper:
             members.setdefault(keys[i], []).append(i)
     for i in approx | skip:
         members.pop(keys[i], None)              # грань без данных обрезки — объект не собрать
@@ -574,6 +599,7 @@ def _rebuild_in_rhino(geo, rt, warn):
          if geo.findPointAttrib("Pw") is not None else np.ones(len(P)))
     to = rt["to"]
     src = rt.get("src")
+    off, vpt = _topology(geo)
     objects = []
     for k, idx in members.items():
         faces = []
@@ -584,7 +610,7 @@ def _rebuild_in_rhino(geo, rt, warn):
             if pr.intrinsicValue("uwrap") or pr.intrinsicValue("vwrap"):
                 faces = None
                 break
-            vi = np.array([[pr.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)]).reshape(-1)
+            vi = vpt[off[i]:off[i + 1]]
             maxabs = max(maxabs, float(np.abs(P[vi]).max()))
             faces.append({"prim": i, "cv": to(P[vi]).reshape(nv, nu, 3).tolist(), "w": W[vi].reshape(nv, nu).tolist(),
                           "ku": [float(x) for x in pr.intrinsicValue("uknots")],
@@ -684,13 +710,17 @@ def _run_retrim(objects, rt, warn, timeout=None):
     return {k: v for k, v in got.items() if k not in bad}
 
 
+def _topology(geo):
+    from .geosig import topology
+    return topology(geo)
+
+
 def _mark_free_points(geo):
     """Точки без примитивов во входе (облака, точки, метки) помечаются ДО преобразований: Convert, удаление
     служебных примитивов и т.п. оставляют лишние точки, которые не должны стать объектами Rhino."""
     used = np.zeros(geo.intrinsicValue("pointcount"), dtype=bool)
-    for prim in geo.iterPrims():
-        for v in prim.vertices():
-            used[v.point().number()] = True
+    _, vpt = _topology(geo)
+    used[vpt] = True
     if used.all():
         return
     a = geo.addAttrib(hou.attribType.Point, "__h3dm_free", 0)
@@ -833,6 +863,7 @@ class Plan(object):
         self.def_order = []      # вложенные определения раньше внешних
         self.passthrough = 0     # объектов перенесено из файла импорта без изменений
         self.rebuilt = 0         # объектов с обрезанными гранями пересобрано в Rhino
+        self.passthrough_fast = 0    # неизменность подтверждена отпечатком (без сравнения точек с исходником)
         self.passthrough_moved = 0   # из них перенесены/повёрнуты в Houdini целиком (исходник с преобразованием)
 
 
@@ -895,6 +926,11 @@ def collect(node):
                 source3dm = open_file(sp)
             except Exception as ex:
                 warn.append("Source file for unchanged objects could not be read: %s" % ex)
+    # исходный файл тот же, что при импорте (отпечаток содержимого) -> работает быстрый путь переноса
+    file_sig_ok = False
+    if source3dm is not None and src.findGlobalAttrib("rhino_file_sig") is not None:
+        from .geosig import file_signature
+        file_sig_ok = src.attribValue("rhino_file_sig") == file_signature(src.attribValue("rhino_file"))
     used_ids = set()
     C, s_ = gx.C, gx.s
 
@@ -955,10 +991,13 @@ def collect(node):
     def gather(geo_in, to_file, objects, depth):
         top = depth == 0
         pt = {"src": source3dm, "to": to_file, "scale": factor, "abs_tol": plan.abs_tol, "map": {},
+              "file_sig_ok": file_sig_ok,
               "eps": lambda m: 8 * 1.2e-7 * m / s_ * factor} if (source3dm is not None and use_pass) else None
         rt = {"to": to_file, "tol": plan.abs_tol, "map": {}, "src": source3dm,
               "eps": lambda m: 8 * 1.2e-7 * m / s_ * factor}
         geo = prepare_geometry(geo_in, node, warn, keep_blocks, pt, rt)
+        if pt:
+            plan.passthrough_fast += pt.get("fast", 0)
         plan.rebuilt += rt.get("count", 0)
         rgrp = geo.findPrimGroup("__h3dm_rt")
         rebuilt = {p.number() for p in rgrp.prims()} if rgrp is not None else set()
@@ -967,8 +1006,8 @@ def collect(node):
             warn.append("%d unchanged NURBS objects were imported by an older H3DM (no rhino_trim_sig): their trims "
                         "cannot be verified, so they are exported from Houdini geometry. Re-import to copy them "
                         "exactly from the source file." % pt["no_sig"])
-        pgrp = geo.findPrimGroup("__h3dm_pass")
-        passed = {p.number() for p in pgrp.prims()} if pgrp is not None else set()
+        passed = (np.frombuffer(geo.primIntAttribValuesAsString("__h3dm_pass"), dtype=np.int32) != 0
+                  if geo.findPrimAttrib("__h3dm_pass") is not None else np.zeros(geo.intrinsicValue("primitivecount"), bool))
         pass_done = set()
         prims = geo.prims()
         n = len(prims)
@@ -1088,16 +1127,9 @@ def collect(node):
         POLY, NCURVE, NSURF = hou.primType.Polygon, hou.primType.NURBSCurve, hou.primType.NURBSSurface
         tpg = geo.findPrimGroup("__h3dm_tplane")
         tplane = {p.number() for p in tpg.prims()} if tpg is not None else set()
+        voff, vpts = _topology(geo)
         for i, prim in enumerate(prims):
-            t = prim.type()
-            if i in rebuilt:
-                k = prim.attribValue("__h3dm_rtkey")
-                if k not in rt_done:
-                    rt_done.add(k)
-                    for b in rt["map"].get(k, []):
-                        objects.append({"kind": "source", "geom": {"g": b, "scale": 1.0}, "attrs": attrs_of(i, prim)})
-                continue
-            if i in passed:
+            if passed[i] and i not in rebuilt:
                 if rid_v[i] not in pass_done:
                     pass_done.add(rid_v[i])
                     M = pt.get("xform", {}).get(rid_v[i])
@@ -1107,8 +1139,16 @@ def collect(node):
                     if M is not None:
                         plan.passthrough_moved += 1
                 continue
+            t = prim.type()
+            if i in rebuilt:
+                k = prim.attribValue("__h3dm_rtkey")
+                if k not in rt_done:
+                    rt_done.add(k)
+                    for b in rt["map"].get(k, []):
+                        objects.append({"kind": "source", "geom": {"g": b, "scale": 1.0}, "attrs": attrs_of(i, prim)})
+                continue
             if t == POLY:
-                pts = [v.point().number() for v in prim.vertices()]
+                pts = vpts[voff[i]:voff[i + 1]].tolist()
                 if prim.isClosed():
                     if len(pts) < 3:
                         continue
@@ -1127,7 +1167,7 @@ def collect(node):
                 objects.append({"kind": "instance", "def": gid, "xform": instance_xform(prim, top),
                                 "attrs": attrs_of(i, prim, oid=rid_v[i] or None)})
             elif t == NCURVE:
-                pts = [v.point().number() for v in prim.vertices()]
+                pts = vpts[voff[i]:voff[i + 1]]
                 closed = bool(prim.intrinsicValue("closed"))
                 order_keys.append(("obj", {"kind": "curve", "geom": {
                     "cv": to_file(P[pts]), "w": pw[pts] if has_pw else np.ones(len(pts)),
@@ -1138,7 +1178,7 @@ def collect(node):
                                 "attrs": attrs_of(i, prim)})
             elif t == NSURF:
                 nu, nv = int(prim.intrinsicValue("nu")), int(prim.intrinsicValue("nv"))
-                idx = np.array([[prim.vertex(u, v).point().number() for u in range(nu)] for v in range(nv)])
+                idx = vpts[voff[i]:voff[i + 1]].reshape(nv, nu)
                 cv = to_file(P[idx.reshape(-1)]).reshape(nv, nu, 3)
                 w = pw[idx] if has_pw else np.ones((nv, nu))
                 # Houdini: нормаль противоположна Rhino (u x v) — разворачиваем U обратно (см. импорт)
@@ -1398,7 +1438,8 @@ def report_text(plan, path=None, writer=None, back=None):
     lines.append("Layers: %d   Materials: %d   Groups: %d   Block definitions: %d"
                  % (len(plan.layers), len(plan.materials), len(plan.groups), len([d for d in plan.definitions.values() if d])))
     if plan.passthrough:
-        lines.append("Unchanged objects written from the source file (exact Breps): %d" % plan.passthrough)
+        lines.append("Unchanged objects written from the source file (exact Breps): %d%s" % (
+            plan.passthrough, "  (%d checked by geometry signature)" % plan.passthrough_fast if plan.passthrough_fast else ""))
         if plan.passthrough_moved:
             lines.append("  of them moved/rotated/scaled as a whole in Houdini (source Brep + exact transform): %d"
                          % plan.passthrough_moved)

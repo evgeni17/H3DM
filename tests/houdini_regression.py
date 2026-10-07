@@ -994,6 +994,10 @@ def run_export_passthrough():
                 tag = "export passthrough %s%s" % (mode, " moved" if moved else "")
                 if not got >= want or ("exact Breps): %d" % len(breps)) not in text:
                     fails.append("%s: exact %d of %d" % (tag, len(got & want), len(want)))
+                # быстрый путь: неизменённые объекты подтверждены отпечатком (сдвинутый купол — нет)
+                m_ = re.search(r"\((\d+) checked by geometry signature\)", text)
+                if not m_ or int(m_.group(1)) != len(want):
+                    fails.append("%s: signature fast path %s, expected %d" % (tag, m_.group(1) if m_ else None, len(want)))
                 if moved:
                     # купол сдвинут целиком на 0,05 м (Houdini Y) -> исходный Brep, поднятый на 50 мм
                     d = [a - b for a, b in zip(box(B[dome].Geometry), box(breps[dome].Geometry))] if dome in B else None

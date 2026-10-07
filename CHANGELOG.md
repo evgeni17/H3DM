@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.0-dev.8 — 2026-10-07
+Faster export (real model, 114 Breps / 3873 faces, everything copied from the source file):
+All NURBS 20 s -> 7.4 s, Mesh + Curves 35 s -> 8.7 s; of that, about 4.5 s is rhino3dm writing the 128 MB file.
+* **Geometry signatures:** the import writes `rhino_geo_sig` on every primitive of a Rhino object (vertex counts,
+  face numbers, positions and weights in float32, NURBS orders and knots) and `rhino_file_sig` (content hash of
+  the source .3dm). The export computes the same signature from arrays; when it matches and the source file is
+  the same, the object is known unchanged without comparing its points with the source (report: "checked by
+  geometry signature"). Otherwise the full comparison runs as before (moved objects, edits).
+* **Trim curves read in binary:** `hou.Geometry.data()` + a binary JSON reader instead of writing and parsing a
+  text .geo (3 s -> 0.2 s on 3873 faces, identical results).
+* **No per-vertex HOM calls:** vertex -> point tables come in one go (`geosig.topology`, attribute promotion);
+  used for passthrough, Rhino rebuild, free points, n-gon detection and writing.
+* Groups are added/removed as whole groups, other primitive types are looked for only when they exist, the
+  passthrough mask is read as an attribute.
+* Mesh + Curves without passthrough also gets faster (23 s -> 8 s).
+
 ## 0.4.0-dev.7 — 2026-10-07
 Asset versions follow the release; nodes in working scenes never change.
 * Node types are versioned by release: release 0.N -> `h3dm::3dm_import::N.0` (0.4 -> `::4.0`); Houdini keeps all

@@ -38,7 +38,7 @@ TYPE_GROUPS = {"Poly": "h3dm_type_polygon", "NURBCurve": "h3dm_type_nurbs_curve"
 TYPE_OTHER = "h3dm_type_other"
 RESERVED = {"P", "Pw", "N", "Cd", "Alpha", "uv", "v", "id", "name", "layer", "path", "material", "user_text",
             "rhino_id", "rhino_type", "rhino_face", "block", "rhino_instance_id", "rhino_object_id",
-            "rhino_part_path", "rhino_block_path", "rhino_xform", "rhino_trim_loops", "rhino_trim_sig", "layer_orig", "name_orig", "transform", "orient",
+            "rhino_part_path", "rhino_block_path", "rhino_xform", "rhino_trim_loops", "rhino_trim_sig", "rhino_geo_sig", "layer_orig", "name_orig", "transform", "orient",
             "pscale", "scale", "up", "text", "type"}
 # id — частый ключ User Text; он не конфликтует с геометрией Houdini, но имя «id» у точек занято системой частиц
 RESERVED_UT = RESERVED - {"id"}
@@ -830,6 +830,11 @@ def _cook_geometry(node, geo, f, opt, gx, naming):
     groups = _emit(geo, b, objs, ctx)
     write_document(geo, f, naming)
     _write_xform(geo, gx)
+    if not opt.pack:
+        # отпечатки объектов: экспорт быстро узнаёт неизменённые (без сравнения с исходником по точкам)
+        from .geosig import write_signatures
+        tcg = geo.findPrimGroup(GROUP_TRIM)
+        write_signatures(geo, [p.number() for p in tcg.prims()] if tcg is not None else ())
     from . import rhino3dm_warning
     warns = ([rhino3dm_warning()] if rhino3dm_warning() else []) + \
         ([gx.warning] if getattr(gx, "warning", None) else []) + list(naming.m.warnings)
@@ -1346,6 +1351,9 @@ def write_document(geo, f, naming=None):
         # для экспорта: имя в Houdini -> исходное имя Rhino (если имя не меняли — вернётся оригинал)
         _detail(geo, "h3dm_export_names", _clean(export_name_maps(f, naming)))
     _detail(geo, "rhino_file", _FILE_PATH.get(id(f), ""))
+    if _FILE_PATH.get(id(f)):
+        from .geosig import file_signature, FILE_SIG_ATTR
+        _detail(geo, FILE_SIG_ATTR, file_signature(_FILE_PATH[id(f)]))
 
 
 def info_text(kwargs):
