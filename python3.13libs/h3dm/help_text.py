@@ -291,7 +291,8 @@ writing. The report (and the read-back check) is on the *Report* tab.
   trim loops exactly as imported (`rhino_trim_loops`, with arcs) when the trims were not edited in Houdini,
   otherwise Houdini's current trim curves — then joined into one Brep (solids stay solids when the faces still
   meet; otherwise several Breps with a warning). Holes, curved faces, poles and seams are supported.
-  Limits: faces are joined at the file tolerance, then up to 20x it; faces that still do not meet are not moved
+  Limits: faces are joined at max(file tolerance, 2x float32 precision of the object's coordinates), then up to
+  20x that (on large or far objects more than 20x the file tolerance); faces that still do not meet are not moved
   or patched — the object comes out as several Breps or open, named in the warning with pieces and naked edges.
   Checked: validity, solid vs source, naked edges (not the distance to the Houdini surfaces). Objects invalid
   in the source file become meshes. Unchanged objects and objects moved as a whole are never rebuilt.
@@ -373,7 +374,9 @@ HELP_EXPORT_RU = u"""= H3DM 3dm Export =
   Houdini, петли обрезки точно как при импорте (`rhino_trim_loops`, с дугами), если обрезку в Houdini не меняли,
   иначе текущие кривые обрезки Houdini — и объединяются в один Brep (тела остаются телами, если грани
   по-прежнему сходятся; иначе несколько Brep с предупреждением). Отверстия, криволинейные грани, полюса и швы
-  поддерживаются. Ограничения: грани объединяются с допуском файла, затем до 20-кратного; не сошедшиеся грани не
+  поддерживаются. Ограничения: грани объединяются с допуском max(допуск файла, удвоенная точность float32
+  координат объекта), затем до 20-кратного (у больших или удалённых объектов — больше 20 допусков файла); не
+  сошедшиеся грани не
   двигаются и не латаются — объект выходит несколькими Brep или незамкнутым, предупреждение называет его, число
   частей и свободных рёбер. Проверяется корректность, замкнутость по сравнению с исходником, свободные рёбра (не
   отклонение от поверхностей Houdini). Объекты, некорректные в исходном файле, — сетками. Неизменённые и

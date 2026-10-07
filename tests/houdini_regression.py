@@ -1623,7 +1623,62 @@ def run_export_xform_override():
     return fails
 
 
+def run_export_sig_edits():
+    """Правки, которые не меняют вершины, но меняют объект: отпечаток должен их видеть. Разомкнутые многоугольники
+    сетки тела (dev.9: быстрый путь писал исходный Brep вместо полилиний)."""
+    import shutil
+    import tempfile
+    from h3dm import sop_export as se, rhino_read as rr
+    fails = []
+    out_dir = tempfile.mkdtemp(prefix="h3dm_export_sig_")
+    tmp = hou.node("/obj").createNode("geo", "__h3dm_regression_export_sig")
+    src = os.path.join(FX, "h3dm_fixture_prepared_v001.3dm")
+    S = {str(o.Attributes.Id): o for o in rr.read(src).Objects if not o.Attributes.IsInstanceDefinitionObject}
+    try:
+        imp = tmp.createNode("h3dm::3dm_import", "imp")
+        imp.parm("diskcache").set(0)
+        imp.parm("file").set(src)
+        imp.parm("geomode").set("mesh_curves")
+        base = imp.geometry().freeze()
+        by = {}
+        for p in base.prims():
+            r = p.attribValue("rhino_id")
+            if r in S and rr.enum_name(S[r].Geometry.ObjectType) in ("Brep", "Extrusion"):
+                by.setdefault(r, []).append(p)
+        rid = next(r for r, ps in sorted(by.items()) if all(p.type() == hou.primType.Polygon for p in ps))
+        g = hou.Geometry(base)
+        n_open = 0
+        for p in g.prims():
+            if p.attribValue("rhino_id") == rid:
+                p.setIsClosed(False)
+                n_open += 1
+        st = tmp.createNode("stash", "edited")
+        st.parm("stash").set(g)
+        ex = tmp.createNode("h3dm::3dm_export", "exp")
+        ex.setInput(0, st)
+        ex.setInput(1, imp, 2)
+        st.parm("stash").set(hou.Geometry(base))
+        ex.parm("file").set(os.path.join(out_dir, "base.3dm"))
+        text0, _ = se.run(ex, write=True)
+        m0 = re.search(r"\((\d+) checked by geometry signature\)", text0)
+        st.parm("stash").set(g)
+        ex.parm("file").set(os.path.join(out_dir, "open.3dm"))
+        text, path = se.run(ex, write=True)
+        got = [rr.enum_name(o.Geometry.ObjectType) for o in rr.read(path).Objects if str(o.Attributes.Id) == rid]
+        if not got or any(k != "Curve" for k in got):
+            fails.append("opened polygons of %s (%d): exported as %s, expected polylines" % (rid[:8], n_open, got))
+        m_ = re.search(r"\((\d+) checked by geometry signature\)", text)
+        if not m0 or not m_ or int(m_.group(1)) != int(m0.group(1)) - 1:
+            fails.append("opened polygons: fast path %s, unedited %s" % (m_.group(1) if m_ else None,
+                                                                         m0.group(1) if m0 else None))
+    finally:
+        tmp.destroy()
+        shutil.rmtree(out_dir, ignore_errors=True)
+    print("houdini_regression export signature edits: %s" % ("OK" if not fails else "FAILED\n  " + "\n  ".join(fails)))
+    return fails
+
+
 result = (run_versions() + run() + run_edgecases() + run_v03() + run_prepare() + run_cache() + run_layer_levels()
           + run_block_ids() + run_constant_attribs() + run_export() + run_export_new() + run_export_scratch()
-          + run_export_passthrough() + run_export_xform_override() + run_export_changes() + run_export_rhino()
+          + run_export_passthrough() + run_export_xform_override() + run_export_sig_edits() + run_export_changes() + run_export_rhino()
           + run_export_real())

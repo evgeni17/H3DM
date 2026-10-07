@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0-dev.10 — 2026-10-07
+* **Fix: the geometry-signature fast path missed edits that keep every vertex.** Opening the polygons of a meshed
+  Brep (they became polylines) still matched the import signature, so the source Brep was written instead of the
+  curves, without a warning. The signature now also covers open polygons and primitive types other than polygons /
+  NURBS (signature version 2: geometry imported by older builds is compared in full, not trusted).
+* Test `run_export_sig_edits` (opened polygons of a meshed solid -> polylines; fails on dev.9).
+* README / node help: the join limit of the Rhino rebuild is 20× max(file tolerance, 2× float32 precision of the
+  object's coordinates), so it can exceed 20× the file tolerance on large or far objects.
+
 ## 0.4.0-dev.9 — 2026-10-07
 * **Fix (regression of dev.8): unchanged Breps ignored a changed export transform.** The geometry-signature fast
   path copied the source Brep to its old place even when the *Xform* input (origin, scene scale or axes) differed

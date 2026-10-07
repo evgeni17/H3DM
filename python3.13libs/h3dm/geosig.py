@@ -20,9 +20,16 @@ import numpy as np
 import hou
 
 SIG_ATTR = "rhino_geo_sig"
-SIG_XFORM_ATTR = "rhino_geo_sig_xform"      # матрица импорта Rhino -> Houdini (12 чисел, строки 3x4)
+SIG_XFORM_ATTR = "rhino_geo_sig_xform"
+# версия состава отпечатка: другая версия при импорте — отпечаток не совпадёт, экспорт сравнит объект полностью.
+# 2: + замкнутость многоугольников и типы, кроме Polygon / NURBS (0.4.0-dev.10)
+SIG_VERSION = b"H3DM-geo-2"      # матрица импорта Rhino -> Houdini (12 чисел, строки 3x4)
 FILE_SIG_ATTR = "rhino_file_sig"
 _FILE_SIGS = {}
+_OTHER_TYPES = tuple(t for t in (getattr(hou.primType, n, None) for n in (
+    "BezierCurve", "BezierSurface", "Circle", "Sphere", "Tube", "Metaball", "MetaSQuad", "PolySoup", "Volume",
+    "VDB", "TriangleBezier", "TriangleFan", "TriangleStrip", "Mesh", "PackedPrim", "PackedFragment",
+    "PackedGeometry", "AlembicRef", "ParticleSystem", "Agent", "Custom")) if t is not None)
 
 
 def _verb(name, parms):
@@ -98,6 +105,19 @@ def object_signatures(geo, topo=None, exclude=()):
         if keep[i]:
             basis[i] = (np.int32([p.intrinsicValue("order"), bool(p.intrinsicValue("closed"))]).tobytes()
                         + np.asarray(p.intrinsicValue("knots"), dtype=np.float32).tobytes())
+    # тип и замкнутость остальных примитивов: незамкнутый многоугольник (сетка, разомкнутая в Houdini, — уже
+    # полилинии), другие типы (Bezier, сфера, polysoup ...) — те же вершины, но другой объект Rhino.
+    # Массово: открытых примитивов и примитивов других типов обычно мало, многоугольники не перебираются.
+    for p in geo.globPrims("@intrinsic:closed==0"):
+        i = p.number()
+        if keep[i] and p.type() == hou.primType.Polygon:
+            basis[i] = b"open-poly"
+    for t in _OTHER_TYPES:
+        if geo.countPrimType(t):
+            for p in geo.iterPrimsOfType(t):
+                i = p.number()
+                if keep[i]:
+                    basis[i] = basis.get(i, b"") + str(t).encode()
     rk = rid[idx]
     uniq, inv = np.unique(rk.astype(str), return_inverse=True)
     order = np.argsort(inv, kind="stable")
@@ -110,7 +130,7 @@ def object_signatures(geo, topo=None, exclude=()):
             vids = vpt[off[prims[0]]:off[prims[-1] + 1]]
         else:
             vids = np.concatenate([vpt[off[i]:off[i + 1]] for i in prims])
-        h = hashlib.sha1(b"H3DM-geo-1")
+        h = hashlib.sha1(SIG_VERSION)
         h.update(cnt[prims].astype(np.int32).tobytes())
         h.update(rf[prims].astype(np.int32).tobytes())
         h.update(P[vids].tobytes())
